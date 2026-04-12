@@ -9,6 +9,12 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from config import coerce_devices_inventory, coerce_drivers_definitions
+from modules.gateway_json_shapes import (
+    normalize_devices_inventory_list,
+    normalize_drivers_definitions,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -26,10 +32,17 @@ def _is_web_style_inventory(inventory: List[Any]) -> bool:
 def apply_progettotesi_device_plumbing(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     - Risolve driver_ref → lookup in drivers_definitions.
-    - Costruisce system_config.interfaces da ogni riga di devices_inventory
-      (Modbus TCP/RTU, M-Bus, KNX), così coesistono più endpoint con lo stesso protocollo.
+    - Parametri di bus: solo dalla *seconda parte* del JSON (devices_inventory[].serial
+      e driver in drivers_definitions), non da `assets` o campi flat duplicati.
+    - Costruisce system_config.interfaces da ogni riga di devices_inventory.
     """
     out = copy.deepcopy(cfg)
+    out["devices_inventory"] = normalize_devices_inventory_list(
+        coerce_devices_inventory(out.get("devices_inventory"))
+    )
+    out["drivers_definitions"] = normalize_drivers_definitions(
+        coerce_drivers_definitions(out.get("drivers_definitions"))
+    )
     inv = out.get("devices_inventory") or []
     if not inv or not _is_web_style_inventory(inv):
         return out
@@ -131,8 +144,15 @@ def apply_progettotesi_device_plumbing(cfg: Dict[str, Any]) -> Dict[str, Any]:
             g: Dict[str, Any] = {}
             if gw_id is not None and str(gw_id) in knx_by_id:
                 g = knx_by_id[str(gw_id)]
-            elif isinstance(default_gw, dict):
+            elif isinstance(default_gw, dict) and (default_gw.get("host") or default_gw.get("port")):
                 g = default_gw
+            elif serial.get("host"):
+                # Seconda parte JSON: tunnel IP sul dispositivo se knx.gateways assente/incompleto
+                try:
+                    sp = int(serial.get("port") or 3671)
+                except (TypeError, ValueError):
+                    sp = 3671
+                g = {"host": str(serial.get("host")).strip(), "port": sp}
             host = (g.get("host") or "127.0.0.1").strip()
             try:
                 kport = int(g.get("port") or 3671)

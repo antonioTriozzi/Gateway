@@ -23,11 +23,21 @@ class KnxMeter(BaseDevice):
         self.handle = gateway_handle
         self.enabled = config.get("enabled", True)
 
+    def telemetry_protocol(self) -> str:
+        return "knx"
+
     async def _read_body(self) -> List[Dict[str, Any]]:
         if self.handle.is_unavailable:
+            log.debug(
+                "KNX '%s': tunnel non disponibile (%s:%s).",
+                self.name,
+                self.handle.host,
+                self.handle.port,
+            )
             return []
 
-        group_addresses = self.config.get("group_addresses") or {}
+        ga_raw = self.config.get("group_addresses")
+        group_addresses = ga_raw if isinstance(ga_raw, dict) else {}
         if not group_addresses:
             log.warning("KNX %s: group_addresses vuoto.", self.name)
             return []
@@ -63,19 +73,30 @@ class KnxMeter(BaseDevice):
                     )
                     await asyncio.sleep(0.02)
                 except asyncio.TimeoutError:
-                    log.debug(
-                        "KNX timeout lettura %s %s (>%ss)",
+                    log.warning(
+                        "KNX '%s' timeout lettura GA %s (>%ss)",
                         self.name,
                         addr,
                         ga_timeout,
                     )
                 except Exception as e:
-                    log.debug(
-                        "KNX lettura %s %s fallita: %s", self.name, addr, e, exc_info=False
+                    log.warning(
+                        "KNX '%s' lettura GA %s fallita: %s",
+                        self.name,
+                        addr,
+                        e,
                     )
 
         if results:
-            log.info("Lettura KNX da '%s': %s", self.name, results)
+            log.debug("Lettura KNX da '%s': %s", self.name, results)
+        elif group_addresses:
+            log.warning(
+                "KNX '%s': nessun valore (gateway %s:%s). Verifica tunnel UDP vs TCP (KNX_TUNNEL_TCP), "
+                "GA e DPT nel driver.",
+                self.name,
+                self.handle.host,
+                self.handle.port,
+            )
         return results
 
     async def read(self) -> List[Dict[str, Any]]:

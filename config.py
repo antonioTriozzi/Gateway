@@ -3,23 +3,102 @@ import copy
 import requests
 import json
 from dotenv import load_dotenv
-from typing import Dict, Any
+from typing import Any, Dict, List
 
 REMOTE_CONFIG_CACHE_PATH = "remote_config.cache.json"
+
+# Chiavi alternative (camelCase / export mobile) → schema snake_case del gateway Python
+_ROOT_KEY_ALIASES = {
+    "configVersion": "config_version",
+    "buildingId": "building_id",
+    "generatedAt": "generated_at",
+    "devicesInventory": "devices_inventory",
+    "driversDefinitions": "drivers_definitions",
+    "systemConfig": "system_config",
+    "assetGatewayPreferences": "asset_gateway_preferences",
+    "uiShow": "ui_show",
+}
+
+_SYSTEM_CONFIG_KEY_ALIASES = {
+    "serialBindings": "serial_bindings",
+    "pollingIntervalSeconds": "polling_interval_seconds",
+}
+
+_KNX_BLOCK_ALIASES = {
+    "defaultGateway": "default_gateway",
+}
+
+
+def _apply_key_aliases(d: Dict[str, Any], aliases: Dict[str, str]) -> None:
+    """Rinomina chiavi in-place; se esiste già la forma snake_case, scarta il duplicato camelCase."""
+    for old, new in aliases.items():
+        if old not in d:
+            continue
+        if new in d and new != old:
+            d.pop(old, None)
+        else:
+            d[new] = d.pop(old)
+
+
+def coerce_devices_inventory(inv: Any) -> List[Dict[str, Any]]:
+    """
+    Accetta array JSON o oggetto con chiavi numeriche (0,1,2…) come da alcuni export.
+    """
+    if inv is None:
+        return []
+    if isinstance(inv, list):
+        return [x for x in inv if isinstance(x, dict)]
+    if isinstance(inv, dict):
+        out: List[Dict[str, Any]] = []
+
+        def _sort_key(k: Any) -> tuple:
+            s = str(k)
+            if s.isdigit():
+                return (0, int(s))
+            return (1, s)
+
+        for k in sorted(inv.keys(), key=_sort_key):
+            v = inv[k]
+            if isinstance(v, dict):
+                out.append(v)
+        return out
+    return []
+
+
+def coerce_drivers_definitions(dd: Any) -> Dict[str, Any]:
+    if isinstance(dd, dict):
+        return dd
+    return {}
 
 
 def normalize_remote_gateway_config(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Adatta il JSON della web app ProgettoTesi (system_config.serial_bindings,
-    polling_interval_seconds) allo schema atteso dal gateway (interfaces, poll_interval).
+    - Payload completo web app (assets, uiShow, …) o minimale GET /config: ignora chiavi extra.
+    - camelCase (Jackson) → snake_case dove serve al runtime.
+    - devices_inventory come dict indicizzato → lista di dispositivi.
+    - system_config.serial_bindings → interfaces (se interfaces assente).
+    - polling_interval_seconds → poll_interval.
     """
     if not data or not isinstance(data, dict):
         return data
     out = copy.deepcopy(data)
+    _apply_key_aliases(out, _ROOT_KEY_ALIASES)
+
+    out["devices_inventory"] = coerce_devices_inventory(out.get("devices_inventory"))
+    out["drivers_definitions"] = coerce_drivers_definitions(out.get("drivers_definitions"))
+
     sc = out.get("system_config")
     if not isinstance(sc, dict):
         return out
     sc = dict(sc)
+    _apply_key_aliases(sc, _SYSTEM_CONFIG_KEY_ALIASES)
+
+    knx = sc.get("knx")
+    if isinstance(knx, dict):
+        knx = dict(knx)
+        _apply_key_aliases(knx, _KNX_BLOCK_ALIASES)
+        sc["knx"] = knx
+
     if "interfaces" not in sc and "serial_bindings" in sc:
         bindings = sc.get("serial_bindings")
         if isinstance(bindings, dict):

@@ -19,3 +19,11 @@ class BaseDevice(ABC):
         Legge i dati dal dispositivo e li restituisce come lista di dizionari.
         """
         pass
+
+    def telemetry_protocol(self) -> str:
+        """Etichetta per il campo `protocol` nel JSON di telemetria (TELEMETRY_JSON)."""
+        return "unknown"
+
+    def emits_telemetry_json_from_driver(self) -> bool:
+        """Se True, read() registra già TELEMETRY_JSON; main evita duplicati."""
+        return False

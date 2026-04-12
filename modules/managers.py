@@ -9,6 +9,7 @@ from modules.devices.knx_meter import KnxMeter
 from modules.devices.modbus_meter import ModbusMeter
 from modules.devices.mbus_meter import MBusMeter
 from modules.gateway_config_adapter import resolve_driver
+from modules.gateway_device_config import merge_gateway_device_config
 from modules.knx_gateway_pool import KnxGatewayPool
 from modules.serial_manager import SerialManager
 from modules.transport_registry import TransportRegistry
@@ -149,7 +150,7 @@ class DeviceManager:
 
             kind, client_or_handle, lock = tup
             protocol = (driver_def.get("protocol") or "").lower()
-            full_device_config = {**driver_def, **dev_info}
+            full_device_config = merge_gateway_device_config(driver_def, dev_info)
 
             if protocol != kind:
                 logging.warning(

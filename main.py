@@ -4,6 +4,14 @@ import logging
 import os
 import sys
 import time
+
+from modules.readings_json import (
+    device_telemetry_document,
+    expand_readings_for_gateway_export,
+    format_telemetry_json,
+    normalize_readings,
+    protocol_for_device,
+)
 from config import (
     load_config,
     fetch_remote_config,
@@ -145,13 +153,20 @@ async def main():
                                 exc_info=False,
                             )
                             continue
-                        if res:
-                            buffer.save_readings(device.device_id, res)
-                        logging.info(
-                            "Dispositivo %s: lettura completata (%s valori in buffer).",
+                        safe = normalize_readings(res) if res else []
+                        export_rows = expand_readings_for_gateway_export(device, safe)
+                        # Salva sempre (formato uscita per protocollo: vedi expand_readings_for_gateway_export).
+                        buffer.save_readings(device.device_id, export_rows)
+                        doc = device_telemetry_document(
                             device.device_id,
-                            len(res),
+                            device.name,
+                            protocol_for_device(device),
+                            export_rows,
                         )
+                        if not device.emits_telemetry_json_from_driver():
+                            logging.info(
+                                "TELEMETRY_JSON %s", format_telemetry_json(doc)
+                            )
                 else:
                     logging.info(
                         "Nessun dispositivo attivo: ciclo a vuoto, il loop continua."

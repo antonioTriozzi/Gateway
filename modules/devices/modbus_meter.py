@@ -6,13 +6,28 @@ from typing import Any, Dict, List, Optional, Union
 
 from pymodbus.client import ModbusSerialClient, ModbusTcpClient
 from pymodbus.exceptions import ConnectionException, ModbusException
+from pymodbus.transport import CommType
 
 from .base_device import BaseDevice
+from modules.readings_json import (
+    device_telemetry_document,
+    expand_readings_for_gateway_export,
+    format_telemetry_json,
+    normalize_readings,
+)
 from modules.transport_registry import TransportRegistry
 
 log = logging.getLogger(__name__)
 
 ModbusClient = Union[ModbusSerialClient, ModbusTcpClient]
+
+
+def _modbus_register_read_kind(reg_type_raw: Any) -> str:
+    """input → read_input_registers; tutto il resto (holding, hr, …) → holding."""
+    u = str(reg_type_raw or "holding").strip().lower().replace("-", "_")
+    if u in ("input", "input_register", "ir"):
+        return "input"
+    return "holding"
 
 
 class ModbusMeter(BaseDevice):
@@ -33,13 +48,28 @@ class ModbusMeter(BaseDevice):
         )
         self.config = config
         self.client = client
-        self.slave_id = self.config.get('slave_id')
+        raw_sid = self.config.get("slave_id")
+        if raw_sid is None:
+            raise ValueError(
+                f"ID schiavo ('slave_id') non specificato per il dispositivo {self.name}."
+            )
+        try:
+            self.slave_id = int(raw_sid)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"slave_id non numerico per {self.name}: {raw_sid!r}"
+            ) from e
         self.enabled = self.config.get('enabled', True)
         # lock asyncio ignorato: serializzazione I/O su client condiviso via threading.Lock nel worker
         self._modbus_tlock = TransportRegistry.modbus_thread_lock(client)
 
-        if not self.slave_id:
-            raise ValueError(f"ID schiavo ('slave_id') non specificato per il dispositivo {self.name}.")
+    def telemetry_protocol(self) -> str:
+        if self.client.comm_params.comm_type == CommType.TCP:
+            return "modbus_tcp"
+        return "modbus_rtu"
+
+    def emits_telemetry_json_from_driver(self) -> bool:
+        return True
 
     def _decode_value(self, registers: List[int], reg_conf: Dict[str, Any]) -> float:
         """Decodifica i registri letti in un valore numerico."""
@@ -79,7 +109,16 @@ class ModbusMeter(BaseDevice):
     def _sync_read_registers(self) -> List[Dict[str, Any]]:
         """I/O pymodbus (bloccante): eseguito in thread per non fermare l'event loop."""
         results: List[Dict[str, Any]] = []
-        register_map = self.config.get("registers", {})
+        register_map = self.config.get("registers")
+        if not isinstance(register_map, dict):
+            register_map = {}
+        if not register_map:
+            log.warning(
+                "Modbus '%s': 'registers' vuoto o assente nella config (driver + inventory); "
+                "nessun registro da leggere.",
+                self.name,
+            )
+            return []
         try:
             if not self.client.connected:
                 if not self.client.connect():
@@ -95,12 +134,21 @@ class ModbusMeter(BaseDevice):
                 if not addresses:
                     continue
 
-                reg_type = reg_conf.get("type", "input")
-                start_address = addresses[0]
+                reg_kind = _modbus_register_read_kind(reg_conf.get("type", "holding"))
+                try:
+                    start_address = int(addresses[0])
+                except (TypeError, ValueError):
+                    log.warning(
+                        "Modbus '%s' misura '%s': indirizzo non numerico %r",
+                        self.name,
+                        name,
+                        addresses[0],
+                    )
+                    continue
                 count = len(addresses)
 
                 try:
-                    if reg_type == "input":
+                    if reg_kind == "input":
                         response = self.client.read_input_registers(
                             address=start_address, count=count, device_id=self.slave_id
                         )
@@ -128,11 +176,11 @@ class ModbusMeter(BaseDevice):
                     continue
 
                 if response.isError():
-                    log.debug(
-                        "Errore Modbus leggendo '%s' da %s (Slave: %s): %s",
-                        name,
+                    log.warning(
+                        "Modbus '%s' slave=%s misura '%s': risposta errore Modbus %s",
                         self.name,
                         self.slave_id,
+                        name,
                         response,
                     )
                     continue
@@ -150,7 +198,14 @@ class ModbusMeter(BaseDevice):
 
             if results:
                 summary = ", ".join([f"{r['name']}: {r['value']} {r['unit']}" for r in results])
-                log.info("Lettura da '%s' (Slave: %s): %s", self.name, self.slave_id, summary)
+                log.debug("Lettura da '%s' (Slave: %s): %s", self.name, self.slave_id, summary)
+            elif register_map:
+                log.warning(
+                    "Modbus '%s' slave=%s: nessuna misura letta (connessione, indirizzi 0-based, "
+                    "tipo input vs holding, o slave_id errato).",
+                    self.name,
+                    self.slave_id,
+                )
 
         except ConnectionException as e:
             log.warning("Modbus '%s': errore di connessione: %s", self.name, e)
@@ -184,7 +239,7 @@ class ModbusMeter(BaseDevice):
         except (TypeError, ValueError):
             timeout = 60.0
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 asyncio.to_thread(self._thread_wrapped_read),
                 timeout=timeout,
             )
@@ -195,3 +250,13 @@ class ModbusMeter(BaseDevice):
                 self.name,
             )
             return []
+        safe = normalize_readings(result) if result else []
+        export_rows = expand_readings_for_gateway_export(self, safe)
+        doc = device_telemetry_document(
+            self.device_id,
+            self.name,
+            self.telemetry_protocol(),
+            export_rows,
+        )
+        log.info("TELEMETRY_JSON %s", format_telemetry_json(doc))
+        return result

@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
+from typing import Any, Dict, List
+
 import httpx
-from typing import Dict, Any, List
 from .data_buffer import DataBuffer
 
 log = logging.getLogger(__name__)
@@ -77,11 +79,21 @@ class DataUploader:
         
         payload_data = []
         for record in records:
-            payload_data.append({
-                "device_id": record['device_name'],
-                "timestamp": record['timestamp'],
-                "readings": record['data']
-            })
+            raw = record["data"]
+            if isinstance(raw, str):
+                try:
+                    readings = json.loads(raw)
+                except json.JSONDecodeError:
+                    readings = []
+            else:
+                readings = raw
+            payload_data.append(
+                {
+                    "device_id": record["device_name"],
+                    "timestamp": record["timestamp"],
+                    "readings": readings,
+                }
+            )
 
         return {
             "gateway_id": self.gateway_id,
