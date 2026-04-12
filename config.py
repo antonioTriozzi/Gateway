@@ -3,7 +3,7 @@ import copy
 import requests
 import json
 from dotenv import load_dotenv
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 REMOTE_CONFIG_CACHE_PATH = "remote_config.cache.json"
 
@@ -26,7 +26,28 @@ _SYSTEM_CONFIG_KEY_ALIASES = {
 
 _KNX_BLOCK_ALIASES = {
     "defaultGateway": "default_gateway",
+    "tunnelTcp": "tunnel_tcp",
 }
+
+_KNX_GATEWAY_ENTRY_ALIASES = {
+    "tunnelTcp": "tunnel_tcp",
+}
+
+
+def coerce_optional_bool(v: Any) -> Optional[bool]:
+    """None se assente/ambiguo; altrimenti bool da JSON/scalar/stringa."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(int(v))
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off", ""):
+        return False
+    return None
 
 
 def _apply_key_aliases(d: Dict[str, Any], aliases: Dict[str, str]) -> None:
@@ -97,6 +118,16 @@ def normalize_remote_gateway_config(data: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(knx, dict):
         knx = dict(knx)
         _apply_key_aliases(knx, _KNX_BLOCK_ALIASES)
+        gateways = knx.get("gateways")
+        if isinstance(gateways, list):
+            normalized_gw: List[Dict[str, Any]] = []
+            for item in gateways:
+                if not isinstance(item, dict):
+                    continue
+                g = dict(item)
+                _apply_key_aliases(g, _KNX_GATEWAY_ENTRY_ALIASES)
+                normalized_gw.append(g)
+            knx["gateways"] = normalized_gw
         sc["knx"] = knx
 
     if "interfaces" not in sc and "serial_bindings" in sc:

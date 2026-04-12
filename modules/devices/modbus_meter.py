@@ -231,24 +231,14 @@ class ModbusMeter(BaseDevice):
     async def read(self) -> List[Dict[str, Any]]:
         """
         Esegue la lettura di tutti i registri configurati per questo dispositivo.
-        L'I/O pymodbus gira in thread; il lock è threading (non asyncio) così un timeout
-        sul ciclo principale non lascia il bus bloccato per i giri successivi.
+        L'I/O pymodbus gira in thread; il lock è threading (non asyncio).
+        Il timeout è applicato nel ciclo principale (main.read_with_timeout), non qui,
+        per evitare doppio wait_for e sovrapposizioni tra dispositivi sullo stesso bus.
         """
         try:
-            timeout = float(os.environ.get("DEVICE_READ_TIMEOUT_SECONDS", "60"))
-        except (TypeError, ValueError):
-            timeout = 60.0
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(self._thread_wrapped_read),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            log.warning(
-                "Timeout Modbus (%ss) per '%s'; il thread può ancora terminare in background.",
-                timeout,
-                self.name,
-            )
+            result = await asyncio.to_thread(self._thread_wrapped_read)
+        except Exception as e:
+            log.warning("Modbus '%s' (async read): %s", self.name, e)
             return []
         safe = normalize_readings(result) if result else []
         export_rows = expand_readings_for_gateway_export(self, safe)

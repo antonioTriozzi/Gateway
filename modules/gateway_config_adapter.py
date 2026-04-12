@@ -9,7 +9,11 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from config import coerce_devices_inventory, coerce_drivers_definitions
+from config import (
+    coerce_devices_inventory,
+    coerce_drivers_definitions,
+    coerce_optional_bool,
+)
 from modules.gateway_json_shapes import (
     normalize_devices_inventory_list,
     normalize_drivers_definitions,
@@ -50,6 +54,7 @@ def apply_progettotesi_device_plumbing(cfg: Dict[str, Any]) -> Dict[str, Any]:
     drivers = out.get("drivers_definitions") or {}
     sc = out.setdefault("system_config", {})
     knx_block = sc.get("knx") or {}
+    default_knx_tunnel_tcp = coerce_optional_bool(knx_block.get("tunnel_tcp"))
     gateways = knx_block.get("gateways") or []
     knx_by_id: Dict[str, Dict[str, Any]] = {}
     for g in gateways:
@@ -158,11 +163,25 @@ def apply_progettotesi_device_plumbing(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 kport = int(g.get("port") or 3671)
             except (TypeError, ValueError):
                 kport = 3671
+            tc_g = coerce_optional_bool(g.get("tunnel_tcp"))
+            tunnel_tcp = tc_g if tc_g is not None else default_knx_tunnel_tcp
             iface = f"knx_{_sanitize_key(host)}_{kport}"
-            new_ifaces.setdefault(
-                iface,
-                {"transport": "knx", "host": host, "port": kport},
-            )
+            knx_iface: Dict[str, Any] = {"transport": "knx", "host": host, "port": kport}
+            if tunnel_tcp is not None:
+                knx_iface["tunnel_tcp"] = tunnel_tcp
+            if iface not in new_ifaces:
+                new_ifaces[iface] = knx_iface
+            elif tunnel_tcp is not None:
+                prev = new_ifaces[iface]
+                prev_tcp = coerce_optional_bool(prev.get("tunnel_tcp"))
+                if prev_tcp is not None and prev_tcp != tunnel_tcp:
+                    log.warning(
+                        "KNX %s: tunnel_tcp conflitto %s vs %s (mantengo ultimo).",
+                        iface,
+                        prev_tcp,
+                        tunnel_tcp,
+                    )
+                prev["tunnel_tcp"] = tunnel_tcp
         else:
             log.warning(
                 "comm_protocol non supportato %r per device_id=%s",

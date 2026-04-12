@@ -87,7 +87,12 @@ class DeviceManager:
                 elif transport == "knx":
                     host = (spec.get("host") or "127.0.0.1").strip()
                     kport = int(spec.get("port") or 3671)
-                    handle = KnxGatewayPool.instance(host, kport)
+                    utcp = spec.get("tunnel_tcp")
+                    handle = (
+                        KnxGatewayPool.instance(host, kport, use_tcp=bool(utcp))
+                        if utcp is not None
+                        else KnxGatewayPool.instance(host, kport)
+                    )
                     out[name] = ("knx", handle, handle.lock)
                     logging.info("KNX %s → %s:%s", name, host, kport)
                 else:

@@ -77,6 +77,30 @@ async def main():
     full_config = {**local_config, **remote_conf}
 
     buffer = DataBuffer()
+
+    try:
+        cycle_total = float(full_config.get("system_config", {}).get("poll_interval", 60))
+    except (TypeError, ValueError):
+        cycle_total = 60.0
+    env_ct = (os.getenv("GATEWAY_CYCLE_TOTAL_SECONDS") or "").strip()
+    if env_ct:
+        try:
+            cycle_total = float(env_ct)
+        except (TypeError, ValueError):
+            pass
+    cycle_total = max(1.0, cycle_total)
+
+    env_rp = (os.getenv("GATEWAY_READ_PHASE_SECONDS") or "").strip()
+    if env_rp:
+        try:
+            read_phase = float(env_rp)
+        except (TypeError, ValueError):
+            read_phase = cycle_total / 2.0
+    else:
+        read_phase = cycle_total / 2.0
+    read_phase = max(0.0, min(read_phase, cycle_total))
+    upload_phase = max(0.0, cycle_total - read_phase)
+
     uploader = DataUploader(config=full_config, buffer=buffer)
     devices = DeviceManager.create_devices(full_config)
     logging.info(f"Dispositivi inizializzati: {len(devices)}")
@@ -88,17 +112,24 @@ async def main():
         thread_name_prefix="gw_io",
     )
     asyncio.get_running_loop().set_default_executor(io_executor)
-    logging.info("Pool thread I/O: %s worker (letture dispositivi in parallelo).", io_workers)
+    logging.info(
+        "Pool thread I/O: %s worker (I/O bloccante in thread; letture dispositivi sequenziali per ciclo).",
+        io_workers,
+    )
 
     await KnxGatewayPool.start_all()
 
     uploader_task = asyncio.create_task(uploader.run())
 
-    try:
-        read_interval = float(full_config.get("system_config", {}).get("poll_interval", 60))
-    except (TypeError, ValueError):
-        read_interval = 60.0
-    logging.info("Intervallo di lettura impostato a %s secondi.", read_interval)
+    logging.info(
+        "Ciclo gateway: %.1fs totali (fase lettura fino a %.1fs, poi pausa %.1fs; "
+        "invio buffer ogni %ss — imposta DATA_UPLOAD_INTERVAL_SECONDS≈%.0f per allineare alla pausa).",
+        cycle_total,
+        read_phase,
+        upload_phase,
+        uploader.upload_interval,
+        upload_phase,
+    )
 
     try:
         read_timeout = float(os.getenv("DEVICE_READ_TIMEOUT_SECONDS", "60"))
@@ -114,48 +145,33 @@ async def main():
             return await asyncio.wait_for(device.read(), timeout=read_timeout)
         except asyncio.TimeoutError:
             logging.warning(
-                "Timeout lettura (%ss) per dispositivo %s; si passa al ciclo successivo.",
+                "Timeout lettura (%ss) per dispositivo %s; si passa al dispositivo successivo.",
                 read_timeout,
                 device.device_id,
             )
             return []
 
-    async def read_labeled(device):
-        return device, await read_with_timeout(device)
-
     try:
         while True:
             cycle_started = time.monotonic()
             try:
-                logging.info("--- Inizio ciclo di lettura ---")
+                logging.info("--- Inizio ciclo di lettura (sequenziale: una lettura per dispositivo) ---")
 
                 active_devices = [d for d in devices if d.enabled]
                 if active_devices:
-                    tasks = [
-                        asyncio.create_task(read_labeled(d), name=f"read:{d.device_id}")
-                        for d in active_devices
-                    ]
-                    for done in asyncio.as_completed(tasks):
+                    for device in active_devices:
                         try:
-                            device, res = await done
+                            res = await read_with_timeout(device)
                         except Exception as e:
-                            logging.error(
-                                "Errore lettura (task): %s",
-                                e,
-                                exc_info=False,
-                            )
-                            continue
-                        if isinstance(res, Exception):
                             logging.error(
                                 "Errore lettura da %s: %s",
                                 device.device_id,
-                                res,
+                                e,
                                 exc_info=False,
                             )
                             continue
                         safe = normalize_readings(res) if res else []
                         export_rows = expand_readings_for_gateway_export(device, safe)
-                        # Salva sempre (formato uscita per protocollo: vedi expand_readings_for_gateway_export).
                         buffer.save_readings(device.device_id, export_rows)
                         doc = device_telemetry_document(
                             device.device_id,
@@ -172,13 +188,24 @@ async def main():
                         "Nessun dispositivo attivo: ciclo a vuoto, il loop continua."
                     )
             finally:
-                elapsed = time.monotonic() - cycle_started
-                pause = max(0.0, read_interval - elapsed)
+                elapsed_after_read = time.monotonic() - cycle_started
+                read_padding = max(0.0, read_phase - elapsed_after_read)
+                if read_padding > 0:
+                    logging.info(
+                        "Fase lettura: attesa aggiuntiva %.1fs (finestra lettura %.1fs).",
+                        read_padding,
+                        read_phase,
+                    )
+                await asyncio.sleep(read_padding)
+                after_read_window = time.monotonic() - cycle_started
+                pause = max(0.0, cycle_total - after_read_window)
                 logging.info(
-                    "--- Ciclo terminato in %.1fs. Dati in attesa: %s. Pausa %.1fs ---",
-                    elapsed,
+                    "--- Dopo fase lettura: %.1fs. Dati in attesa: %s. Pausa (fase invio / idle) %.1fs "
+                    "(ciclo totale %.1fs) ---",
+                    after_read_window,
                     buffer.count_pending(),
                     pause,
+                    cycle_total,
                 )
                 await asyncio.sleep(pause)
 

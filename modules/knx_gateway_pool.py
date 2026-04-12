@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Dict, Tuple
 
 from xknx import XKNX
@@ -20,13 +21,21 @@ def _env_use_knx_tcp() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _knx_reconnect_interval_seconds() -> float:
+    try:
+        return max(5.0, float(os.getenv("KNX_RECONNECT_INTERVAL_SECONDS", "60")))
+    except (TypeError, ValueError):
+        return 60.0
+
+
 class KnxGatewayHandle:
     def __init__(self, host: str, port: int, *, use_tcp: bool | None = None):
         self.host = host
         self.port = int(port)
         self.lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
-        tcp = _env_use_knx_tcp() if use_tcp is None else use_tcp
+        tcp = _env_use_knx_tcp() if use_tcp is None else bool(use_tcp)
+        self._use_tcp = tcp
         conn_type = ConnectionType.TUNNELING_TCP if tcp else ConnectionType.TUNNELING
         self.xknx = XKNX(
             connection_config=ConnectionConfig(
@@ -37,57 +46,99 @@ class KnxGatewayHandle:
         )
         self._started = False
         self._connection_failed = False
+        self._next_retry_at: float | None = None
 
     @property
     def is_unavailable(self) -> bool:
-        return self._connection_failed
+        """True durante il backoff dopo un fallimento (non più blocco permanente)."""
+        if self._started:
+            return False
+        if not self._connection_failed:
+            return False
+        if self._next_retry_at is None:
+            return True
+        return time.monotonic() < self._next_retry_at
+
+    @property
+    def is_connected(self) -> bool:
+        """Tunnel KNX avviato con successo."""
+        return self._started
 
     async def ensure_started(self) -> None:
-        if self._connection_failed:
-            return
         if self._started:
             return
-        async with self._start_lock:
-            if self._connection_failed or self._started:
+        now = time.monotonic()
+        if self._connection_failed:
+            if self._next_retry_at is not None and now < self._next_retry_at:
                 return
+            # Backoff scaduto: nuovo tentativo (come riconnessione Modbus dopo guasto)
+            self._connection_failed = False
+            self._next_retry_at = None
+            log.info(
+                "KNX nuovo tentativo connessione verso %s:%s (tunnel %s).",
+                self.host,
+                self.port,
+                "TCP" if self._use_tcp else "UDP",
+            )
+
+        async with self._start_lock:
+            if self._started:
+                return
+            if self._connection_failed and self._next_retry_at is not None:
+                if time.monotonic() < self._next_retry_at:
+                    return
             try:
                 await self.xknx.start()
                 self._started = True
+                self._connection_failed = False
+                self._next_retry_at = None
                 log.info("KNX tunnel avviato verso %s:%s", self.host, self.port)
             except CommunicationError as e:
                 self._connection_failed = True
+                self._next_retry_at = time.monotonic() + _knx_reconnect_interval_seconds()
                 log.warning(
-                    "KNX non raggiungibile su %s:%s (%s). "
-                    "Dispositivi KNX disabilitati per questa sessione. "
-                    "Verifica che il gateway/simulatore sia avviato; se usa tunnel TCP imposta KNX_TUNNEL_TCP=true nel .env.",
+                    "KNX non raggiungibile su %s:%s (%s). Riprovo tra %.0fs "
+                    "(KNX_RECONNECT_INTERVAL_SECONDS). Tunnel attuale: %s. Se serve TCP: "
+                    "KNX_TUNNEL_TCP=true nel .env oppure system_config.knx.tunnel_tcp (o per gateway).",
                     self.host,
                     self.port,
                     e,
+                    _knx_reconnect_interval_seconds(),
+                    "TCP" if self._use_tcp else "UDP",
                 )
             except Exception as e:
                 self._connection_failed = True
+                self._next_retry_at = time.monotonic() + _knx_reconnect_interval_seconds()
                 log.warning(
-                    "Avvio KNX fallito verso %s:%s: %s",
+                    "Avvio KNX fallito verso %s:%s: %s. Riprovo tra %.0fs.",
                     self.host,
                     self.port,
                     e,
+                    _knx_reconnect_interval_seconds(),
                 )
 
     async def stop(self) -> None:
-        if not self._started:
-            return
-        await self.xknx.stop()
+        if self._started:
+            try:
+                await self.xknx.stop()
+            except Exception as e:
+                log.debug("KNX stop: %s", e)
         self._started = False
+        self._connection_failed = False
+        self._next_retry_at = None
 
 
 class KnxGatewayPool:
-    _handles: Dict[Tuple[str, int], KnxGatewayHandle] = {}
+    _handles: Dict[Tuple[str, int, bool], KnxGatewayHandle] = {}
 
     @classmethod
-    def instance(cls, host: str, port: int) -> KnxGatewayHandle:
-        key = (host.strip(), int(port))
+    def instance(
+        cls, host: str, port: int, *, use_tcp: bool | None = None
+    ) -> KnxGatewayHandle:
+        tcp = _env_use_knx_tcp() if use_tcp is None else bool(use_tcp)
+        key = (host.strip(), int(port), tcp)
         if key not in cls._handles:
-            cls._handles[key] = KnxGatewayHandle(key[0], key[1])
+            cls._handles[key] = KnxGatewayHandle(key[0], key[1], use_tcp=tcp)
         return cls._handles[key]
 
     @classmethod

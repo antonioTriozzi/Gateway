@@ -1,9 +1,16 @@
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from .base_device import BaseDevice
+from modules.readings_json import (
+    device_telemetry_document,
+    expand_readings_for_gateway_export,
+    format_telemetry_json,
+    normalize_readings,
+)
 from modules.transport_registry import TransportRegistry
 
 try:
@@ -47,6 +54,25 @@ def _mbus_record_display_name(record: Any) -> str:
     except Exception:
         pass
     return "measure"
+
+
+def _mbus_raw_to_list(raw: Any) -> List[int]:
+    if raw is None or raw is False:
+        return []
+    if isinstance(raw, (bytes, bytearray)):
+        return list(raw)
+    if isinstance(raw, list):
+        return raw
+    return list(raw)
+
+
+def _mbus_load_frame(raw: Any) -> Any:
+    if not raw or raw is False:
+        return None
+    try:
+        return meterbus.load(_mbus_raw_to_list(raw))
+    except Exception:
+        return None
 
 
 def _mbus_data_records(data: Any) -> List[Any]:
@@ -107,6 +133,53 @@ class MBusMeter(BaseDevice):
     def telemetry_protocol(self) -> str:
         return "mbus"
 
+    def emits_telemetry_json_from_driver(self) -> bool:
+        return True
+
+    def _open_mbus_serial(self, port: str, baudrate: int):
+        """Porta seriale allineata a config (parity da `serial`) e timeout da env (come Modbus RTU)."""
+        import serial
+
+        ser_cfg = self.config.get("serial")
+        if not isinstance(ser_cfg, dict):
+            ser_cfg = {}
+        parity_raw = (ser_cfg.get("parity") or "E").strip().upper()
+        if parity_raw in ("EVEN", "E"):
+            par = serial.PARITY_EVEN
+        elif parity_raw in ("ODD", "O"):
+            par = serial.PARITY_ODD
+        else:
+            par = serial.PARITY_NONE
+
+        try:
+            raw_to = float(os.getenv("MBUS_SERIAL_TIMEOUT_SECONDS", "3.0"))
+        except (TypeError, ValueError):
+            raw_to = 3.0
+        try:
+            cap = float(os.getenv("MBUS_SERIAL_TIMEOUT_CAP_SECONDS", "12"))
+        except (TypeError, ValueError):
+            cap = 12.0
+        if cap > 0:
+            timeout = max(0.3, min(raw_to, cap))
+        else:
+            timeout = max(0.3, raw_to)
+        if timeout < raw_to:
+            log.debug(
+                "M-Bus '%s': timeout seriale %.1fs limitato a %.1fs (MBUS_SERIAL_TIMEOUT_CAP_SECONDS).",
+                self.name,
+                raw_to,
+                timeout,
+            )
+
+        return serial.Serial(
+            port=port,
+            baudrate=int(baudrate),
+            parity=par,
+            stopbits=serial.STOPBITS_ONE,
+            bytesize=serial.EIGHTBITS,
+            timeout=timeout,
+        )
+
     def _read_all_sync(self) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
         target_measures = self.config.get("target_measures") or []
@@ -162,53 +235,55 @@ class MBusMeter(BaseDevice):
         return self._read_all_sync()
 
     async def read(self) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
         if not meterbus:
             log.error("Libreria 'pyMeterBus' non installata. Impossibile leggere dispositivo M-Bus.")
-            return []
+        else:
+            try:
+                timeout = float(os.environ.get("DEVICE_READ_TIMEOUT_SECONDS", "60"))
+            except (TypeError, ValueError):
+                timeout = 60.0
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(self._thread_wrapped_read),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                log.warning(
+                    "Timeout M-Bus (%ss) per '%s' su %s; il thread può ancora terminare in background.",
+                    timeout,
+                    self.name,
+                    self._mbus_port or "?",
+                )
+            except Exception as e:
+                log.error("Errore durante la lettura M-Bus di %s: %s", self.name, e)
 
-        try:
-            timeout = float(os.environ.get("DEVICE_READ_TIMEOUT_SECONDS", "60"))
-        except (TypeError, ValueError):
-            timeout = 60.0
-
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._thread_wrapped_read),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            log.warning(
-                "Timeout M-Bus (%ss) per '%s' su %s; il thread può ancora terminare in background.",
-                timeout,
-                self.name,
-                self._mbus_port or "?",
-            )
-            return []
-        except Exception as e:
-            log.error("Errore durante la lettura M-Bus di %s: %s", self.name, e)
-            return []
+        safe = normalize_readings(result) if result else []
+        export_rows = expand_readings_for_gateway_export(self, safe)
+        doc = device_telemetry_document(
+            self.device_id,
+            self.name,
+            self.telemetry_protocol(),
+            export_rows,
+        )
+        log.info("TELEMETRY_JSON %s", format_telemetry_json(doc))
+        return result
 
     def _sync_read(self, port: str, baudrate: int):
         """
         API pymeterbus / python-meterbus 0.8.x: pyserial + send_ping_frame / send_request_frame / recv_frame.
-        (Le vecchie send_ping/request_data non esistono in questa versione.)
+        Dopo il ping la risposta è spesso un ACK/corto: si svuota con recv ripetuti, poi REQ_UD2 e si
+        attende un TelegramLong (dati variabili).
         """
         if not meterbus or not port:
             return None
+        from meterbus.telegram_long import TelegramLong
+
         try:
-            import serial
+            ser = self._open_mbus_serial(port, baudrate)
         except ImportError:
             log.error("M-Bus '%s': pyserial non installato.", self.name)
             return None
-        try:
-            ser = serial.Serial(
-                port=port,
-                baudrate=int(baudrate),
-                parity=serial.PARITY_EVEN,
-                stopbits=serial.STOPBITS_ONE,
-                bytesize=serial.EIGHTBITS,
-                timeout=2.0,
-            )
         except Exception as e:
             log.warning(
                 "M-Bus '%s': impossibile aprire la porta seriale %s (%s).",
@@ -218,12 +293,36 @@ class MBusMeter(BaseDevice):
             )
             return None
         try:
-            meterbus.send_ping_frame(ser, self.slave_id)
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            time.sleep(0.02)
+
+            skip_ping = (os.getenv("MBUS_SKIP_PING") or "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+
+            if not skip_ping:
+                meterbus.send_ping_frame(ser, self.slave_id)
+                for _ in range(4):
+                    raw = meterbus.recv_frame(ser)
+                    if not raw or raw is False:
+                        break
+                    parsed = _mbus_load_frame(raw)
+                    if isinstance(parsed, TelegramLong):
+                        return parsed
+
             meterbus.send_request_frame(ser, self.slave_id)
-            raw = meterbus.recv_frame(ser)
-            if not raw or raw is False:
-                return None
-            return meterbus.load(raw)
+            for _ in range(10):
+                raw = meterbus.recv_frame(ser)
+                if not raw or raw is False:
+                    continue
+                parsed = _mbus_load_frame(raw)
+                if isinstance(parsed, TelegramLong):
+                    return parsed
+            return None
         except Exception as e:
             log.warning(
                 "M-Bus '%s' su %s indirizzo %s: lettura fallita (%s). Porta libera, baud e cablaggio?",
