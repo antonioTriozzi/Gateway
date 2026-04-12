@@ -1,0 +1,7 @@
+pymodbus>=3.0.0
+python-dotenv
+httpx
+requests
+pyserial
+pyMeterBus
+xknx>=3.0.0
