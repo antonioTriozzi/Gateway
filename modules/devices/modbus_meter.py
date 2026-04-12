@@ -1,9 +1,11 @@
 import asyncio
-import struct
 import logging
+import os
+import struct
 from typing import Any, Dict, List, Optional, Union
 
 from pymodbus.client import ModbusSerialClient, ModbusTcpClient
+from pymodbus.exceptions import ConnectionException, ModbusException
 
 from .base_device import BaseDevice
 from modules.transport_registry import TransportRegistry
@@ -33,7 +35,8 @@ class ModbusMeter(BaseDevice):
         self.client = client
         self.slave_id = self.config.get('slave_id')
         self.enabled = self.config.get('enabled', True)
-        self.lock = lock or TransportRegistry.lock_for_modbus_client(client)
+        # lock asyncio ignorato: serializzazione I/O su client condiviso via threading.Lock nel worker
+        self._modbus_tlock = TransportRegistry.modbus_thread_lock(client)
 
         if not self.slave_id:
             raise ValueError(f"ID schiavo ('slave_id') non specificato per il dispositivo {self.name}.")
@@ -67,53 +70,128 @@ class ModbusMeter(BaseDevice):
             log.warning(f"Tipo di dato '{data_type}' non gestito per {self.name}.")
             return 0.0
 
+    def _safe_close(self) -> None:
+        try:
+            self.client.close()
+        except Exception:
+            pass
+
+    def _sync_read_registers(self) -> List[Dict[str, Any]]:
+        """I/O pymodbus (bloccante): eseguito in thread per non fermare l'event loop."""
+        results: List[Dict[str, Any]] = []
+        register_map = self.config.get("registers", {})
+        try:
+            if not self.client.connected:
+                if not self.client.connect():
+                    log.warning(
+                        "Modbus '%s': server non raggiungibile (%s). Nessuna lettura in questo ciclo.",
+                        self.name,
+                        self.client,
+                    )
+                    return []
+
+            for name, reg_conf in register_map.items():
+                addresses = reg_conf.get("addresses")
+                if not addresses:
+                    continue
+
+                reg_type = reg_conf.get("type", "input")
+                start_address = addresses[0]
+                count = len(addresses)
+
+                try:
+                    if reg_type == "input":
+                        response = self.client.read_input_registers(
+                            address=start_address, count=count, device_id=self.slave_id
+                        )
+                    else:
+                        response = self.client.read_holding_registers(
+                            address=start_address, count=count, device_id=self.slave_id
+                        )
+                except ConnectionException as e:
+                    log.warning(
+                        "Modbus '%s': connessione fallita durante '%s': %s",
+                        self.name,
+                        name,
+                        e,
+                    )
+                    self._safe_close()
+                    break
+                except ModbusException as e:
+                    # Es. ModbusIOException: nessuna risposta / timeout — niente stack trace
+                    log.warning(
+                        "Modbus '%s' misura '%s': %s",
+                        self.name,
+                        name,
+                        e,
+                    )
+                    continue
+
+                if response.isError():
+                    log.debug(
+                        "Errore Modbus leggendo '%s' da %s (Slave: %s): %s",
+                        name,
+                        self.name,
+                        self.slave_id,
+                        response,
+                    )
+                    continue
+
+                value = self._decode_value(response.registers, reg_conf)
+                scale = reg_conf.get("scale", 1.0)
+                final_value = value * scale
+                results.append(
+                    {
+                        "name": name,
+                        "value": round(final_value, 3),
+                        "unit": reg_conf.get("unit", ""),
+                    }
+                )
+
+            if results:
+                summary = ", ".join([f"{r['name']}: {r['value']} {r['unit']}" for r in results])
+                log.info("Lettura da '%s' (Slave: %s): %s", self.name, self.slave_id, summary)
+
+        except ConnectionException as e:
+            log.warning("Modbus '%s': errore di connessione: %s", self.name, e)
+            self._safe_close()
+        except ModbusException as e:
+            log.warning("Modbus '%s': errore bus/IO: %s", self.name, e)
+            self._safe_close()
+        except Exception as e:
+            log.warning("Modbus '%s': errore imprevisto: %s", self.name, e)
+            self._safe_close()
+
+        return results
+
+    def _thread_wrapped_read(self) -> List[Dict[str, Any]]:
+        with self._modbus_tlock:
+            try:
+                return self._sync_read_registers()
+            except Exception as e:
+                # Evita traceback su stderr da worker thread / futures
+                log.warning("Modbus '%s' (worker): %s", self.name, e)
+                return []
+
     async def read(self) -> List[Dict[str, Any]]:
         """
         Esegue la lettura di tutti i registri configurati per questo dispositivo.
+        L'I/O pymodbus gira in thread; il lock è threading (non asyncio) così un timeout
+        sul ciclo principale non lascia il bus bloccato per i giri successivi.
         """
-        results = []
-        register_map = self.config.get('registers', {})
-        
-        async with self.lock:
-            try:
-                if not self.client.connected:
-                    self.client.connect()
-                
-                for name, reg_conf in register_map.items():
-                    addresses = reg_conf.get('addresses')
-                    if not addresses:
-                        continue
-
-                    reg_type = reg_conf.get('type', 'input')
-                    start_address = addresses[0]
-                    count = len(addresses)
-                    
-                    if reg_type == 'input':
-                        response = self.client.read_input_registers(address=start_address, count=count, device_id=self.slave_id)
-                    else:
-                        response = self.client.read_holding_registers(address=start_address, count=count, device_id=self.slave_id)
-                    
-                    if response.isError():
-                        log.debug(f"Errore Modbus leggendo '{name}' da {self.name} (Slave: {self.slave_id}): {response}")
-                        continue
-                    
-                    value = self._decode_value(response.registers, reg_conf)
-                    
-                    scale = reg_conf.get('scale', 1.0)
-                    final_value = value * scale
-                    
-                    results.append({
-                        'name': name,
-                        'value': round(final_value, 3),
-                        'unit': reg_conf.get('unit', '')
-                    })
-                    await asyncio.sleep(0.05)
-                
-                if results:
-                    summary = ", ".join([f"{r['name']}: {r['value']} {r['unit']}" for r in results])
-                    log.info(f"Lettura da '{self.name}' (Slave: {self.slave_id}): {summary}")
-
-            except Exception as e:
-                log.error(f"Eccezione durante la lettura di {self.name}: {e}", exc_info=True)
-            
-            return results
+        try:
+            timeout = float(os.environ.get("DEVICE_READ_TIMEOUT_SECONDS", "60"))
+        except (TypeError, ValueError):
+            timeout = 60.0
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._thread_wrapped_read),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Timeout Modbus (%ss) per '%s'; il thread può ancora terminare in background.",
+                timeout,
+                self.name,
+            )
+            return []

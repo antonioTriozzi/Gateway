@@ -1,6 +1,9 @@
 import asyncio
+import concurrent.futures
 import logging
+import os
 import sys
+import time
 from config import (
     load_config,
     fetch_remote_config,
@@ -24,6 +27,9 @@ def setup_logging():
     if log.hasHandlers():
         log.handlers.clear()
     log.addHandler(handler)
+    # pymodbus: messaggi ERROR su connect / I/O (spesso ridondanti con i nostri WARNING).
+    logging.getLogger("pymodbus.logging").setLevel(logging.CRITICAL)
+    logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
 
 async def main():
     setup_logging()
@@ -67,33 +73,99 @@ async def main():
     devices = DeviceManager.create_devices(full_config)
     logging.info(f"Dispositivi inizializzati: {len(devices)}")
 
+    # Un worker per dispositivo (o più) così nessun COM/TCP lento blocca le letture parallele.
+    io_workers = max(16, len(devices) * 3, 1)
+    io_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=io_workers,
+        thread_name_prefix="gw_io",
+    )
+    asyncio.get_running_loop().set_default_executor(io_executor)
+    logging.info("Pool thread I/O: %s worker (letture dispositivi in parallelo).", io_workers)
+
     await KnxGatewayPool.start_all()
 
     uploader_task = asyncio.create_task(uploader.run())
 
-    read_interval = full_config.get('system_config', {}).get('poll_interval', 60)
-    logging.info(f"Intervallo di lettura impostato a {read_interval} secondi.")
+    try:
+        read_interval = float(full_config.get("system_config", {}).get("poll_interval", 60))
+    except (TypeError, ValueError):
+        read_interval = 60.0
+    logging.info("Intervallo di lettura impostato a %s secondi.", read_interval)
+
+    try:
+        read_timeout = float(os.getenv("DEVICE_READ_TIMEOUT_SECONDS", "60"))
+    except (TypeError, ValueError):
+        read_timeout = 60.0
+    logging.info(
+        "Timeout massimo per singola lettura dispositivo: %ss (DEVICE_READ_TIMEOUT_SECONDS).",
+        read_timeout,
+    )
+
+    async def read_with_timeout(device):
+        try:
+            return await asyncio.wait_for(device.read(), timeout=read_timeout)
+        except asyncio.TimeoutError:
+            logging.warning(
+                "Timeout lettura (%ss) per dispositivo %s; si passa al ciclo successivo.",
+                read_timeout,
+                device.device_id,
+            )
+            return []
+
+    async def read_labeled(device):
+        return device, await read_with_timeout(device)
 
     try:
         while True:
-            logging.info("--- Inizio ciclo di lettura ---")
-            
-            active_devices = [device for device in devices if device.enabled]
-            read_tasks = [device.read() for device in active_devices]
+            cycle_started = time.monotonic()
+            try:
+                logging.info("--- Inizio ciclo di lettura ---")
 
-            if read_tasks:
-                results = await asyncio.gather(*read_tasks, return_exceptions=True)
-
-                for device, res in zip(active_devices, results):
-                    if isinstance(res, Exception):
-                        logging.error(f"Errore lettura da {device.device_id}: {res}", exc_info=False)
-                    elif res:
-                        buffer.save_readings(device.device_id, res)
-            else:
-                logging.warning("Nessun dispositivo attivo da leggere.")
-            
-            logging.info(f"--- Ciclo terminato. Dati in attesa: {buffer.count_pending()} ---")
-            await asyncio.sleep(read_interval)
+                active_devices = [d for d in devices if d.enabled]
+                if active_devices:
+                    tasks = [
+                        asyncio.create_task(read_labeled(d), name=f"read:{d.device_id}")
+                        for d in active_devices
+                    ]
+                    for done in asyncio.as_completed(tasks):
+                        try:
+                            device, res = await done
+                        except Exception as e:
+                            logging.error(
+                                "Errore lettura (task): %s",
+                                e,
+                                exc_info=False,
+                            )
+                            continue
+                        if isinstance(res, Exception):
+                            logging.error(
+                                "Errore lettura da %s: %s",
+                                device.device_id,
+                                res,
+                                exc_info=False,
+                            )
+                            continue
+                        if res:
+                            buffer.save_readings(device.device_id, res)
+                        logging.info(
+                            "Dispositivo %s: lettura completata (%s valori in buffer).",
+                            device.device_id,
+                            len(res),
+                        )
+                else:
+                    logging.info(
+                        "Nessun dispositivo attivo: ciclo a vuoto, il loop continua."
+                    )
+            finally:
+                elapsed = time.monotonic() - cycle_started
+                pause = max(0.0, read_interval - elapsed)
+                logging.info(
+                    "--- Ciclo terminato in %.1fs. Dati in attesa: %s. Pausa %.1fs ---",
+                    elapsed,
+                    buffer.count_pending(),
+                    pause,
+                )
+                await asyncio.sleep(pause)
 
     except asyncio.CancelledError:
         logging.info("Loop principale in fase di chiusura.")
@@ -107,6 +179,12 @@ async def main():
         except asyncio.CancelledError:
             pass
         await KnxGatewayPool.stop_all()
+        try:
+            ex = asyncio.get_running_loop().get_default_executor()
+            if isinstance(ex, concurrent.futures.ThreadPoolExecutor):
+                ex.shutdown(wait=False, cancel_futures=True)
+        except RuntimeError:
+            pass
         logging.info("Gateway arrestato.")
 
 if __name__ == "__main__":

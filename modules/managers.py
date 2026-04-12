@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
@@ -46,7 +47,23 @@ class DeviceManager:
                     baud = int(spec.get("baud_rate") or 9600)
                     parity = spec.get("parity") or "N"
                     stopbits = int(spec.get("stop_bits") or 1)
-                    timeout = float(spec.get("timeout") or 1.0)
+                    raw_timeout = float(spec.get("timeout") or 1.0)
+                    try:
+                        cap = float(os.getenv("MODBUS_SERIAL_TIMEOUT_CAP_SECONDS", "12"))
+                    except (TypeError, ValueError):
+                        cap = 12.0
+                    if cap > 0:
+                        timeout = max(0.3, min(raw_timeout, cap))
+                    else:
+                        timeout = max(0.3, raw_timeout)
+                    if timeout < raw_timeout:
+                        logging.info(
+                            "Modbus RTU %s: timeout seriale da config %.1fs limitato a %.1fs "
+                            "(MODBUS_SERIAL_TIMEOUT_CAP_SECONDS).",
+                            name,
+                            raw_timeout,
+                            timeout,
+                        )
                     client, lock = TransportRegistry.get_modbus_rtu(
                         port,
                         baud,
