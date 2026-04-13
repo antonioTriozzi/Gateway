@@ -31,46 +31,59 @@ class DataUploader:
 
         self.buffer = buffer
         self.is_running = False
+        self._flush_lock = asyncio.Lock()
 
-    async def run(self):
+    async def flush_pending(self) -> int:
         """
-        Task principale che gira in background per inviare i dati.
+        Invia tutti i record pendenti in un solo batch (thread-safe tra chiamate).
+        Chiamare a fine ciclo lettura dispositivi, così non si invia solo il primo dispositivo
+        (es. Modbus TCP) mentre gli altri sono ancora in lettura.
         """
-        self.is_running = True
-        log.info(f"DataUploader avviato. Intervallo di invio: {self.upload_interval} secondi.")
-
         if not self.api_url or not self.gateway_id:
-            log.warning("URL di upload o ID Gateway non configurati. L'upload è disabilitato.")
-            self.is_running = False
-            return
+            return 0
 
-        while self.is_running:
+        async with self._flush_lock:
             try:
-                await asyncio.sleep(self.upload_interval)
-                
                 pending_data = self.buffer.get_pending_readings(limit=100)
                 if not pending_data:
-                    continue
+                    return 0
 
-                log.info(f"Trovati {len(pending_data)} record da inviare.")
-                
+                log.info("Trovati %s record da inviare.", len(pending_data))
+
                 payload = self._build_payload(pending_data)
-                
+
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.post(self.api_url, json=payload, headers=self.headers)
                     response.raise_for_status()
 
-                # Se l'invio ha successo, cancella i record dal buffer
-                successful_ids = [r['id'] for r in pending_data]
+                successful_ids = [r["id"] for r in pending_data]
                 self.buffer.delete_readings_batch(successful_ids)
-                log.info(f"Inviati e cancellati {len(successful_ids)} record con successo.")
+                log.info("Inviati e cancellati %s record con successo.", len(successful_ids))
+                return len(successful_ids)
 
             except httpx.HTTPStatusError as e:
-                log.error(f"Errore HTTP durante l'upload: {e.response.status_code} - {e.response.text}")
+                log.error(
+                    "Errore HTTP durante l'upload: %s - %s",
+                    e.response.status_code,
+                    e.response.text,
+                )
             except httpx.RequestError as e:
-                log.error(f"Errore di rete durante l'upload: {e}")
+                log.error("Errore di rete durante l'upload: %s", e)
             except Exception as e:
-                log.error(f"Errore imprevisto in DataUploader: {e}", exc_info=True)
+                log.error("Errore imprevisto in DataUploader.flush_pending: %s", e, exc_info=True)
+            return 0
+
+    async def run(self) -> None:
+        """
+        Non usato dal gateway: l'upload è `flush_pending()` da main.py dopo tutte le letture.
+        Mantenuto per compatibilità con eventuali script esterni.
+        """
+        self.is_running = True
+        log.info(
+            "DataUploader.run() è deprecato: invio batch da main dopo il ciclo dispositivi "
+            "(upload_interval_seconds=%s ignorato per il timer).",
+            self.upload_interval,
+        )
 
     def _build_payload(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

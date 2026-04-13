@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import struct
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from pymodbus.client import ModbusSerialClient, ModbusTcpClient
@@ -106,6 +107,46 @@ class ModbusMeter(BaseDevice):
         except Exception:
             pass
 
+    def _is_modbus_tcp(self) -> bool:
+        return self.client.comm_params.comm_type == CommType.TCP
+
+    @staticmethod
+    def _tcp_keep_session_open() -> bool:
+        """Se true: non chiudere TCP dopo la lettura (PLC che preferiscono sessione lunga). Default: chiudi."""
+        v = (os.getenv("MODBUS_TCP_KEEP_SESSION_OPEN") or "").strip().lower()
+        return v in ("1", "true", "yes")
+
+    def _tcp_host_port(self) -> tuple[str, int]:
+        p = self.client.comm_params
+        return ((p.host or "127.0.0.1").strip(), int(p.port))
+
+    def _rebind_tcp_client_from_registry(self) -> None:
+        """Usa sempre l'istanza attuale nel registry (riciclata dopo l'ultima lettura sulla stessa interfaccia)."""
+        host, port = self._tcp_host_port()
+        self.client, _ = TransportRegistry.get_modbus_tcp(host, port)
+        self._modbus_tlock = TransportRegistry.modbus_thread_lock(self.client)
+
+    def _is_serial_rtu(self) -> bool:
+        return self.client.comm_params.comm_type == CommType.SERIAL
+
+    def _flush_serial_rx(self) -> None:
+        """Pulisce RX pyserial: riduce frame sporchi tra un ciclo e l'altro o tra letture multiple."""
+        if not self._is_serial_rtu():
+            return
+        try:
+            sock = getattr(self.client, "socket", None)
+            if sock is not None and hasattr(sock, "reset_input_buffer"):
+                sock.reset_input_buffer()
+        except Exception:
+            pass
+
+    def _rtu_inter_register_delay_s(self) -> float:
+        try:
+            v = float(os.getenv("MODBUS_RTU_INTER_REGISTER_DELAY_SECONDS", "0.02"))
+        except (TypeError, ValueError):
+            v = 0.02
+        return max(0.0, v)
+
     def _sync_read_registers(self) -> List[Dict[str, Any]]:
         """I/O pymodbus (bloccante): eseguito in thread per non fermare l'event loop."""
         results: List[Dict[str, Any]] = []
@@ -119,7 +160,13 @@ class ModbusMeter(BaseDevice):
                 self.name,
             )
             return []
+
+        tcp = self._is_modbus_tcp()
+        close_tcp_after = tcp and not self._tcp_keep_session_open()
+
         try:
+            if tcp:
+                self._rebind_tcp_client_from_registry()
             if not self.client.connected:
                 if not self.client.connect():
                     log.warning(
@@ -129,7 +176,13 @@ class ModbusMeter(BaseDevice):
                     )
                     return []
 
-            for name, reg_conf in register_map.items():
+            if self._is_serial_rtu():
+                self._flush_serial_rx()
+
+            delay_s = self._rtu_inter_register_delay_s()
+            for reg_index, (name, reg_conf) in enumerate(register_map.items()):
+                if reg_index > 0 and delay_s > 0 and self._is_serial_rtu():
+                    time.sleep(delay_s)
                 addresses = reg_conf.get("addresses")
                 if not addresses:
                     continue
@@ -173,6 +226,7 @@ class ModbusMeter(BaseDevice):
                         name,
                         e,
                     )
+                    self._flush_serial_rx()
                     continue
 
                 if response.isError():
@@ -183,6 +237,7 @@ class ModbusMeter(BaseDevice):
                         name,
                         response,
                     )
+                    self._flush_serial_rx()
                     continue
 
                 value = self._decode_value(response.registers, reg_conf)
@@ -213,9 +268,19 @@ class ModbusMeter(BaseDevice):
         except ModbusException as e:
             log.warning("Modbus '%s': errore bus/IO: %s", self.name, e)
             self._safe_close()
+        except OSError as e:
+            # Windows: 10053 connessione abortita dal peer/host; 10054 reset dal peer
+            log.warning("Modbus '%s': errore socket OS: %s", self.name, e)
+            self._safe_close()
         except Exception as e:
             log.warning("Modbus '%s': errore imprevisto: %s", self.name, e)
             self._safe_close()
+        finally:
+            # TCP: nuova istanza pymodbus dopo ogni lettura (connect() sullo stesso oggetto può fallire al 2° giro).
+            if close_tcp_after:
+                host, port = self._tcp_host_port()
+                self.client = TransportRegistry.recycle_modbus_tcp(host, port)
+                self._modbus_tlock = TransportRegistry.modbus_thread_lock(self.client)
 
         return results
 

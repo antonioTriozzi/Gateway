@@ -90,6 +90,30 @@ class TransportRegistry:
         return cls._tcp[key], lock
 
     @classmethod
+    def recycle_modbus_tcp(cls, host: str, port: int) -> ModbusTcpClient:
+        """
+        Chiude e sostituisce il client TCP in cache con una nuova istanza pymodbus.
+        Alcuni stack (Windows + simulatori) lasciano l'istanza vecchia non riconnettibile
+        dopo close(); una nuova istanza evita letture vuote al ciclo successivo.
+        """
+        key = (host.strip(), int(port))
+        old = cls._tcp.pop(key, None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        t = _modbus_timeout()
+        nc = ModbusTcpClient(
+            host.strip(),
+            port=int(port),
+            timeout=t,
+            retries=_modbus_retries(),
+        )
+        cls._tcp[key] = nc
+        return nc
+
+    @classmethod
     def lock_for_modbus_client(cls, client: ModbusSerialClient | ModbusTcpClient) -> asyncio.Lock:
         p = client.comm_params
         if p.comm_type == CommType.TCP:

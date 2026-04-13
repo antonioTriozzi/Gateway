@@ -100,16 +100,31 @@ def _cfg_ids(device: Any) -> tuple[Any, Any, str, str]:
     return cfg.get("building_id"), cfg.get("asset_id"), str(device_id), str(asset_name)
 
 
+def _common_telemetry_context(device: Any) -> Dict[str, Any]:
+    building_id, asset_id, device_id, asset_name = _cfg_ids(device)
+    cfg = getattr(device, "config", None) or {}
+    return {
+        "device_id": device_id,
+        "building_id": building_id,
+        "asset_id": asset_id,
+        "asset_name": asset_name,
+        "client_id": cfg.get("client_id"),
+        "client_mail": cfg.get("client_mail"),
+    }
+
+
 def expand_readings_for_gateway_export(
     device: Any, safe_readings: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """
     Formato uscita per protocollo (come da specifica integrazione):
-    - Modbus TCP/RTU e M-Bus: name, value, unit, device_id, building_id, asset_id
-    - KNX: measure, group_address, value, unit, raw, dpt, device_id, building_id, asset_id, asset_name
+    - Modbus TCP/RTU e M-Bus: measure, value, unit, device_id, building_id, asset_id,
+      asset_name, client_id, client_mail
+    - KNX: measure, group_address, value, unit, raw, dpt, device_id, building_id, asset_id,
+      asset_name, client_id, client_mail
     """
     protocol = protocol_for_device(device)
-    building_id, asset_id, device_id, asset_name = _cfg_ids(device)
+    ctx = _common_telemetry_context(device)
     cfg = getattr(device, "config", None) or {}
 
     if protocol == "knx":
@@ -129,34 +144,27 @@ def expand_readings_for_gateway_export(
                 dpt = str(spec.get("dpt") or "")
             val = json_safe_value(r.get("value"))
             unit = "" if r.get("unit") is None else str(r.get("unit", ""))
-            out.append(
-                {
-                    "measure": measure,
-                    "group_address": addr,
-                    "value": val,
-                    "unit": unit,
-                    "raw": val,
-                    "dpt": dpt,
-                    "device_id": device_id,
-                    "building_id": building_id,
-                    "asset_id": asset_id,
-                    "asset_name": asset_name,
-                }
-            )
+            row: Dict[str, Any] = {
+                "measure": measure,
+                "group_address": addr,
+                "value": val,
+                "unit": unit,
+                "raw": val,
+                "dpt": dpt,
+            }
+            row.update(ctx)
+            out.append(row)
         return out
 
     out_mb: List[Dict[str, Any]] = []
     for r in safe_readings:
         if not isinstance(r, dict):
             continue
-        out_mb.append(
-            {
-                "name": str(r.get("name", "")),
-                "value": json_safe_value(r.get("value")),
-                "unit": "" if r.get("unit") is None else str(r.get("unit", "")),
-                "device_id": device_id,
-                "building_id": building_id,
-                "asset_id": asset_id,
-            }
-        )
+        row = {
+            "measure": str(r.get("name", "")),
+            "value": json_safe_value(r.get("value")),
+            "unit": "" if r.get("unit") is None else str(r.get("unit", "")),
+        }
+        row.update(ctx)
+        out_mb.append(row)
     return out_mb

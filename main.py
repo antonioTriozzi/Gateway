@@ -119,15 +119,11 @@ async def main():
 
     await KnxGatewayPool.start_all()
 
-    uploader_task = asyncio.create_task(uploader.run())
-
     logging.info(
         "Ciclo gateway: %.1fs totali (fase lettura fino a %.1fs, poi pausa %.1fs; "
-        "invio buffer ogni %ss — imposta DATA_UPLOAD_INTERVAL_SECONDS≈%.0f per allineare alla pausa).",
+        "upload telemetria a fine lettura di tutti i dispositivi, retry a fine pausa se il buffer non è vuoto).",
         cycle_total,
         read_phase,
-        upload_phase,
-        uploader.upload_interval,
         upload_phase,
     )
 
@@ -183,6 +179,9 @@ async def main():
                             logging.info(
                                 "TELEMETRY_JSON %s", format_telemetry_json(doc)
                             )
+
+                    await uploader.flush_pending()
+
                 else:
                     logging.info(
                         "Nessun dispositivo attivo: ciclo a vuoto, il loop continua."
@@ -209,17 +208,15 @@ async def main():
                 )
                 await asyncio.sleep(pause)
 
+                if buffer.count_pending() > 0:
+                    await uploader.flush_pending()
+
     except asyncio.CancelledError:
         logging.info("Loop principale in fase di chiusura.")
     except KeyboardInterrupt:
         logging.info("Interruzione da tastiera ricevuta.")
     finally:
         logging.info("Arresto dei servizi...")
-        uploader_task.cancel()
-        try:
-            await uploader_task
-        except asyncio.CancelledError:
-            pass
         await KnxGatewayPool.stop_all()
         try:
             ex = asyncio.get_running_loop().get_default_executor()

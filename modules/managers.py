@@ -156,6 +156,7 @@ class DeviceManager:
             kind, client_or_handle, lock = tup
             protocol = (driver_def.get("protocol") or "").lower()
             full_device_config = merge_gateway_device_config(driver_def, dev_info)
+            # client_id / client_mail: solo da devices_inventory (relazione Asset → Client), non dalla root.
 
             if protocol != kind:
                 logging.warning(

@@ -17,6 +17,8 @@ _ROOT_KEY_ALIASES = {
     "systemConfig": "system_config",
     "assetGatewayPreferences": "asset_gateway_preferences",
     "uiShow": "ui_show",
+    "clientId": "client_id",
+    "clientMail": "client_mail",
 }
 
 _SYSTEM_CONFIG_KEY_ALIASES = {
