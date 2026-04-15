@@ -9,6 +9,7 @@ from xknx.telegram.address import parse_device_group_address
 from xknx.telegram.apci import GroupValueResponse, GroupValueWrite
 
 from modules.devices.base_device import BaseDevice
+from modules.knx_dpt_export import measure_and_unit_for_dpt
 from modules.knx_gateway_pool import KnxGatewayHandle
 from modules.readings_json import (
     device_telemetry_document,
@@ -18,6 +19,47 @@ from modules.readings_json import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _coerce_knx_ga_spec(measure_key: str, spec: Any) -> Dict[str, Any] | None:
+    """Normalizza una voce di group_addresses (dict, stringa legacy, chiave = GA)."""
+    if isinstance(spec, str):
+        a = spec.strip()
+        if not a:
+            return None
+        return {"address": a}
+    if not isinstance(spec, dict):
+        return None
+    addr = spec.get("address") or spec.get("ga") or spec.get("group_address")
+    if not addr:
+        mk = str(measure_key).strip()
+        if "/" in mk:
+            addr = mk
+    if not addr:
+        return None
+    out = dict(spec)
+    out["address"] = str(addr).strip()
+    return out
+
+
+def _knx_reading_labels(
+    measure_key: str, spec: Dict[str, Any]
+) -> tuple[str, str, str]:
+    """(nome export, unit export, dpt per decode xknx)."""
+    dpt_raw = spec.get("dpt")
+    if isinstance(dpt_raw, str):
+        dpt_s = dpt_raw.strip()
+    elif dpt_raw is not None and dpt_raw != "":
+        dpt_s = str(dpt_raw).strip()
+    else:
+        dpt_s = ""
+    dpt_read = dpt_s if dpt_s else "1.001"
+    exp_m, exp_u = measure_and_unit_for_dpt(dpt_s) if dpt_s else (None, None)
+    cfg_u = spec.get("unit")
+    unit_fallback = "" if cfg_u is None else str(cfg_u)
+    name_out = exp_m if exp_m is not None else str(measure_key)
+    unit_out = exp_u if exp_u is not None else unit_fallback
+    return name_out, unit_out, dpt_read
 
 
 async def _read_group_address(
@@ -87,31 +129,25 @@ class KnxMeter(BaseDevice):
                     self.handle.host,
                     self.handle.port,
                 )
-                for measure_name, spec in group_addresses.items():
-                    if not isinstance(spec, dict) or not spec.get("address"):
+                for measure_name, spec_raw in group_addresses.items():
+                    spec = _coerce_knx_ga_spec(str(measure_name), spec_raw)
+                    if not spec:
                         continue
-                    results.append(
-                        {
-                            "name": str(measure_name),
-                            "value": None,
-                            "unit": "" if spec.get("unit") is None else str(spec.get("unit", "")),
-                        }
-                    )
+                    n_out, u_out, _ = _knx_reading_labels(str(measure_name), spec)
+                    results.append({"name": n_out, "value": None, "unit": u_out})
                 return results
 
-            for measure_name, spec in group_addresses.items():
-                if not isinstance(spec, dict):
+            for measure_name, spec_raw in group_addresses.items():
+                spec = _coerce_knx_ga_spec(str(measure_name), spec_raw)
+                if not spec:
                     continue
-                addr = spec.get("address")
-                if not addr:
-                    continue
-                dpt = spec.get("dpt") or "1.001"
-                unit = spec.get("unit") or ""
+                addr = spec["address"]
+                n_out, u_out, dpt_read = _knx_reading_labels(str(measure_name), spec)
                 val: Any = None
                 try:
                     val = await asyncio.wait_for(
                         _read_group_address(
-                            self.handle.xknx, str(addr), str(dpt), ga_timeout
+                            self.handle.xknx, str(addr), str(dpt_read), ga_timeout
                         ),
                         timeout=ga_timeout + 2.0,
                     )
@@ -129,13 +165,7 @@ class KnxMeter(BaseDevice):
                         addr,
                         e,
                     )
-                results.append(
-                    {
-                        "name": str(measure_name),
-                        "value": val,
-                        "unit": "" if unit is None else str(unit),
-                    }
-                )
+                results.append({"name": n_out, "value": val, "unit": u_out})
                 await asyncio.sleep(0.02)
 
         if any(r.get("value") is not None for r in results):

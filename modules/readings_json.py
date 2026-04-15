@@ -120,37 +120,24 @@ def expand_readings_for_gateway_export(
     Formato uscita per protocollo (come da specifica integrazione):
     - Modbus TCP/RTU e M-Bus: measure, value, unit, device_id, building_id, asset_id,
       asset_name, client_id, client_mail
-    - KNX: measure, group_address, value, unit, raw, dpt, device_id, building_id, asset_id,
-      asset_name, client_id, client_mail
+    - KNX: measure, value, unit, device_id, building_id, asset_id, asset_name, client_id,
+      client_mail
     """
     protocol = protocol_for_device(device)
     ctx = _common_telemetry_context(device)
-    cfg = getattr(device, "config", None) or {}
 
     if protocol == "knx":
-        ga = cfg.get("group_addresses") or {}
-        if not isinstance(ga, dict):
-            ga = {}
         out: List[Dict[str, Any]] = []
         for r in safe_readings:
             if not isinstance(r, dict):
                 continue
             measure = str(r.get("name", ""))
-            spec = ga.get(measure) if measure in ga else None
-            addr = ""
-            dpt = ""
-            if isinstance(spec, dict):
-                addr = str(spec.get("address") or "")
-                dpt = str(spec.get("dpt") or "")
             val = json_safe_value(r.get("value"))
             unit = "" if r.get("unit") is None else str(r.get("unit", ""))
             row: Dict[str, Any] = {
                 "measure": measure,
-                "group_address": addr,
                 "value": val,
                 "unit": unit,
-                "raw": val,
-                "dpt": dpt,
             }
             row.update(ctx)
             out.append(row)
