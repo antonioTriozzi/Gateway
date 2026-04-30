@@ -113,6 +113,18 @@ def _common_telemetry_context(device: Any) -> Dict[str, Any]:
     }
 
 
+def readings_for_buffer_export(export_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Buffer/upload: solo righe con valore presente (esclude measure con value null)."""
+    out: List[Dict[str, Any]] = []
+    for r in export_rows:
+        if not isinstance(r, dict):
+            continue
+        if r.get("value") is None:
+            continue
+        out.append(r)
+    return out
+
+
 def expand_readings_for_gateway_export(
     device: Any, safe_readings: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:

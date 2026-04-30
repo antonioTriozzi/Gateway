@@ -11,6 +11,7 @@ from modules.readings_json import (
     format_telemetry_json,
     normalize_readings,
     protocol_for_device,
+    readings_for_buffer_export,
 )
 from config import (
     load_config,
@@ -168,7 +169,9 @@ async def main():
                             continue
                         safe = normalize_readings(res) if res else []
                         export_rows = expand_readings_for_gateway_export(device, safe)
-                        buffer.save_readings(device.device_id, export_rows)
+                        buffer_rows = readings_for_buffer_export(export_rows)
+                        if buffer_rows:
+                            buffer.save_readings(device.device_id, buffer_rows)
                         doc = device_telemetry_document(
                             device.device_id,
                             device.name,

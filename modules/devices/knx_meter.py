@@ -109,15 +109,13 @@ class KnxMeter(BaseDevice):
             return []
 
         try:
-            ga_timeout = float(os.getenv("KNX_GROUP_READ_TIMEOUT_SECONDS", "10"))
+            ga_timeout = float(os.getenv("KNX_GROUP_READ_TIMEOUT_SECONDS", "20"))
         except (TypeError, ValueError):
-            ga_timeout = 10.0
+            ga_timeout = 20.0
 
         results: List[Dict[str, Any]] = []
 
         async with self.handle.lock:
-            # Sempre ensure_started prima: altrimenti durante il backoff non si riprova mai
-            # (il vecchio check is_unavailable in testa saltava del tutto la riconnessione).
             await self.handle.ensure_started()
             if not self.handle.is_connected:
                 log.warning(
