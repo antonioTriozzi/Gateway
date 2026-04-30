@@ -14,6 +14,7 @@ from modules.readings_json import (
     device_telemetry_document,
     expand_readings_for_gateway_export,
     format_telemetry_json,
+    format_telemetry_log_line,
     normalize_readings,
 )
 from modules.transport_registry import TransportRegistry
@@ -313,5 +314,6 @@ class ModbusMeter(BaseDevice):
             self.telemetry_protocol(),
             export_rows,
         )
-        log.info("TELEMETRY_JSON %s", format_telemetry_json(doc))
+        log.debug("TELEMETRY_JSON %s", format_telemetry_json(doc))
+        log.info("TELEMETRY %s", format_telemetry_log_line(doc))
         return result

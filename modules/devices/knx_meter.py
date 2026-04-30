@@ -15,6 +15,7 @@ from modules.readings_json import (
     device_telemetry_document,
     expand_readings_for_gateway_export,
     format_telemetry_json,
+    format_telemetry_log_line,
     normalize_readings,
 )
 
@@ -119,10 +120,7 @@ class KnxMeter(BaseDevice):
             await self.handle.ensure_started()
             if not self.handle.is_connected:
                 log.warning(
-                    "KNX '%s': tunnel non connesso (%s:%s). "
-                    "Se il gateway usa tunnel TCP: KNX_TUNNEL_TCP=true nel .env oppure "
-                    "system_config.knx.tunnel_tcp / tunnelTcp (anche per singolo gateway). "
-                    "Verifica firewall e simulatore.",
+                    "KNX '%s': tunnel non connesso %s:%s (KNX_TUNNEL_TCP nel .env se serve TCP).",
                     self.name,
                     self.handle.host,
                     self.handle.port,
@@ -199,5 +197,6 @@ class KnxMeter(BaseDevice):
             self.telemetry_protocol(),
             export_rows,
         )
-        log.info("TELEMETRY_JSON %s", format_telemetry_json(doc))
+        log.debug("TELEMETRY_JSON %s", format_telemetry_json(doc))
+        log.info("TELEMETRY %s", format_telemetry_log_line(doc))
         return result

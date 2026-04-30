@@ -92,6 +92,22 @@ def format_telemetry_json(doc: Dict[str, Any]) -> str:
     return json.dumps(doc, ensure_ascii=False)
 
 
+def format_telemetry_log_line(doc: Dict[str, Any]) -> str:
+    """Riga compatta per log INFO (il JSON completo va in DEBUG)."""
+    readings = doc.get("readings")
+    if not isinstance(readings, list):
+        readings = []
+    n = len(readings)
+    with_val = sum(
+        1 for r in readings if isinstance(r, dict) and r.get("value") is not None
+    )
+    did = doc.get("device_id") or "?"
+    proto = doc.get("protocol") or "?"
+    name = doc.get("device_name") or ""
+    tail = f" ({name})" if name else ""
+    return f"{did}{tail} [{proto}] {with_val}/{n} misure con valore"
+
+
 def _cfg_ids(device: Any) -> tuple[Any, Any, str, str]:
     """building_id, asset_id, device_id, asset_name da config inventario + BaseDevice."""
     cfg = getattr(device, "config", None) or {}

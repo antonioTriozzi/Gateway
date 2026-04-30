@@ -2,6 +2,7 @@ import os
 import copy
 import requests
 import json
+from pathlib import Path
 from dotenv import load_dotenv
 from typing import Any, Dict, List, Optional
 
@@ -150,23 +151,35 @@ def load_config() -> Dict[str, Any]:
     """
     Carica la configurazione locale dal file .env.
     """
-    load_dotenv()
+    _root = Path(__file__).resolve().parent
+    load_dotenv(_root / ".env")
     try:
         upload_interval = int(os.getenv("DATA_UPLOAD_INTERVAL_SECONDS", "30"))
     except (ValueError, TypeError):
         print("Attenzione: DATA_UPLOAD_INTERVAL_SECONDS non valido. Uso default (30).")
         upload_interval = 30
 
+    upload_format = (os.getenv("DATA_UPLOAD_FORMAT") or "web").strip().lower()
+    upload_token = (os.getenv("DATA_UPLOAD_TOKEN") or "").strip()
+    gateway_ingest_secret = (os.getenv("GATEWAY_INGEST_SECRET") or "").strip()
+
     config = {
-        "id_condominio": os.getenv("ID_CONDOMINIO"),
+        "id_condominio": (os.getenv("ID_CONDOMINIO") or "").strip() or None,
         "remote_config": {
-            "url": os.getenv("REMOTE_CONFIG_URL"),
+            "url": (os.getenv("REMOTE_CONFIG_URL") or "").strip() or None,
             "token": os.getenv("REMOTE_CONFIG_TOKEN"),
         },
         "data_upload": {
-            "url": os.getenv("DATA_UPLOAD_URL"),
+            "url": (os.getenv("DATA_UPLOAD_URL") or "").strip() or None,
+            # Con DATA_UPLOAD_FORMAT=middleware e senza GATEWAY_INGEST_SECRET: JWT middleware (POST /auth/login :8081), mai JWT web 8080.
+            "token": upload_token or None,
             "upload_interval_seconds": upload_interval,
-        }
+            # web = batch {gateway_id, data:[...]} verso ProgettoTesi telemetry;
+            # middleware = array piatta ConsumoIngestItem verso POST .../api/consumi
+            "format": upload_format,
+            # Se valorizzato con middleware: header X-Gateway-Ingest-Token (stesso valore di app.gateway-ingest.secret)
+            "gateway_ingest_secret": gateway_ingest_secret or None,
+        },
     }
 
     if not config["id_condominio"] or config["id_condominio"] == "INSERIRE_ID_QUI":

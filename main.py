@@ -9,6 +9,7 @@ from modules.readings_json import (
     device_telemetry_document,
     expand_readings_for_gateway_export,
     format_telemetry_json,
+    format_telemetry_log_line,
     normalize_readings,
     protocol_for_device,
     readings_for_buffer_export,
@@ -75,7 +76,8 @@ async def main():
     
     logging.info("Configurazione remota pronta per l'uso (da server o cache).")
 
-    full_config = {**local_config, **remote_conf}
+    # Preferisci valori .env (upload URL, GATEWAY_INGEST_SECRET, …) su eventuali chiavi omonime nel JSON remoto.
+    full_config = {**remote_conf, **local_config}
 
     buffer = DataBuffer()
 
@@ -179,9 +181,10 @@ async def main():
                             export_rows,
                         )
                         if not device.emits_telemetry_json_from_driver():
-                            logging.info(
+                            logging.debug(
                                 "TELEMETRY_JSON %s", format_telemetry_json(doc)
                             )
+                            logging.info("TELEMETRY %s", format_telemetry_log_line(doc))
 
                     await uploader.flush_pending()
 

@@ -155,7 +155,17 @@ class DeviceManager:
 
             kind, client_or_handle, lock = tup
             protocol = (driver_def.get("protocol") or "").lower()
-            full_device_config = merge_gateway_device_config(driver_def, dev_info)
+            full_device_config = dict(merge_gateway_device_config(driver_def, dev_info))
+            # Middleware consumi richiede building_id: se manca in inventario, usa root config o ID_CONDOMINIO.
+            if full_device_config.get("building_id") is None:
+                bid = config.get("building_id")
+                if bid is None and config.get("id_condominio") not in (None, ""):
+                    try:
+                        bid = int(str(config["id_condominio"]).strip())
+                    except (TypeError, ValueError):
+                        bid = None
+                if bid is not None:
+                    full_device_config["building_id"] = bid
             # client_id / client_mail: solo da devices_inventory (relazione Asset → Client), non dalla root.
 
             if protocol != kind:
