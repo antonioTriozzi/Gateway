@@ -108,23 +108,78 @@ def format_telemetry_log_line(doc: Dict[str, Any]) -> str:
     return f"{did}{tail} [{proto}] {with_val}/{n} misure con valore"
 
 
-def _cfg_ids(device: Any) -> tuple[Any, Any, str, str]:
-    """building_id, asset_id, device_id, asset_name da config inventario + BaseDevice."""
+def _cfg_ids(device: Any) -> tuple[Any, str, str]:
+    """building_id, device_id, asset_name da config inventario + BaseDevice."""
     cfg = getattr(device, "config", None) or {}
     device_id = getattr(device, "device_id", None) or cfg.get("device_id") or ""
     asset_name = getattr(device, "name", None) or cfg.get("name") or ""
-    return cfg.get("building_id"), cfg.get("asset_id"), str(device_id), str(asset_name)
+    return cfg.get("building_id"), str(device_id), str(asset_name)
+
+
+def _coerce_building_id(val: Any) -> Any:
+    """Intero JSON per `building_id` (middleware: Long). Accetta int, float intero, stringa numerica."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        try:
+            i = int(val)
+            return i if i == val or abs(val - i) < 1e-9 else None
+        except (ValueError, OverflowError):
+            return None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        try:
+            return int(s, 10)
+        except ValueError:
+            try:
+                return int(float(s.replace(",", ".")))
+            except ValueError:
+                return None
+    return None
+
+
+def middleware_consumo_numeric_value(val: Any) -> Any:
+    """
+    Valore JSON numerico per POST /api/consumi (middleware: `value` come Double).
+    KNX/M-Bus possono produrre boolean — Jackson non deserializza true/false in Double senza adattatore.
+    """
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return 1.0 if val else 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        lower = s.lower()
+        if lower in ("true", "on", "yes"):
+            return 1.0
+        if lower in ("false", "off", "no"):
+            return 0.0
+        try:
+            return float(s.replace(",", "."))
+        except ValueError:
+            return None
+    if isinstance(val, Decimal):
+        return float(val)
+    return None
 
 
 def _common_telemetry_context(device: Any) -> Dict[str, Any]:
-    building_id, asset_id, device_id, asset_name = _cfg_ids(device)
+    building_id, device_id, asset_name = _cfg_ids(device)
     cfg = getattr(device, "config", None) or {}
     return {
         "device_id": device_id,
-        "building_id": building_id,
-        "asset_id": asset_id,
+        "building_id": _coerce_building_id(building_id),
         "asset_name": asset_name,
-        "client_id": cfg.get("client_id"),
         "client_mail": cfg.get("client_mail"),
     }
 
@@ -146,10 +201,9 @@ def expand_readings_for_gateway_export(
 ) -> List[Dict[str, Any]]:
     """
     Formato uscita per protocollo (come da specifica integrazione):
-    - Modbus TCP/RTU e M-Bus: measure, value, unit, device_id, building_id, asset_id,
-      asset_name, client_id, client_mail
-    - KNX: measure, value, unit, device_id, building_id, asset_id, asset_name, client_id,
-      client_mail
+    - Modbus TCP/RTU e M-Bus: measure, value, unit, device_id, building_id,
+      asset_name, client_mail
+    - KNX: measure, value, unit, device_id, building_id, asset_name, client_mail
     """
     protocol = protocol_for_device(device)
     ctx = _common_telemetry_context(device)
@@ -160,7 +214,7 @@ def expand_readings_for_gateway_export(
             if not isinstance(r, dict):
                 continue
             measure = str(r.get("name", ""))
-            val = json_safe_value(r.get("value"))
+            val = middleware_consumo_numeric_value(json_safe_value(r.get("value")))
             unit = "" if r.get("unit") is None else str(r.get("unit", ""))
             row: Dict[str, Any] = {
                 "measure": measure,
@@ -177,7 +231,7 @@ def expand_readings_for_gateway_export(
             continue
         row = {
             "measure": str(r.get("name", "")),
-            "value": json_safe_value(r.get("value")),
+            "value": middleware_consumo_numeric_value(json_safe_value(r.get("value"))),
             "unit": "" if r.get("unit") is None else str(r.get("unit", "")),
         }
         row.update(ctx)
