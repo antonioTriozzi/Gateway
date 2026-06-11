@@ -26,6 +26,7 @@ from modules.knx_gateway_pool import KnxGatewayPool
 from modules.managers import DeviceManager
 from modules.data_buffer import DataBuffer
 from modules.data_uploader import DataUploader
+from modules.web_auth import WebAppAuthClient, WebAppAuthError
 
 def setup_logging():
     """Configura il logging per l'applicazione."""
@@ -52,11 +53,23 @@ async def main():
         logging.error(f"Errore critico nella configurazione locale: {e}")
         sys.exit(1)
 
-    remote_conf = fetch_remote_config(
-        base_url=local_config["remote_config"]["url"],
-        condominio_id=local_config["id_condominio"],
-        token=local_config["remote_config"]["token"]
+    # Autenticazione M2M (Client Credentials): JWT a vita breve, solo in RAM.
+    web_auth = WebAppAuthClient(
+        token_url=local_config["web_auth"]["token_url"],
+        client_id=local_config["web_auth"]["client_id"],
+        client_secret=local_config["web_auth"]["client_secret"],
     )
+
+    remote_conf = None
+    try:
+        access_token = web_auth.get_token()
+        remote_conf = fetch_remote_config(
+            base_url=local_config["remote_config"]["url"],
+            condominio_id=local_config["id_condominio"],
+            token=access_token,
+        )
+    except WebAppAuthError as e:
+        logging.error("Autenticazione client_credentials fallita: %s", e)
 
     if remote_conf:
         remote_conf = normalize_remote_gateway_config(remote_conf)
@@ -104,7 +117,7 @@ async def main():
     read_phase = max(0.0, min(read_phase, cycle_total))
     upload_phase = max(0.0, cycle_total - read_phase)
 
-    uploader = DataUploader(config=full_config, buffer=buffer)
+    uploader = DataUploader(config=full_config, buffer=buffer, auth=web_auth)
     devices = DeviceManager.create_devices(full_config)
     logging.info(f"Dispositivi inizializzati: {len(devices)}")
 

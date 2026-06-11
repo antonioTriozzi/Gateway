@@ -174,13 +174,13 @@ def middleware_consumo_numeric_value(val: Any) -> Any:
 
 
 def _common_telemetry_context(device: Any) -> Dict[str, Any]:
+    # NIENTE dati anagrafici (client_mail/client_id): il gateway è isolato dagli utenti,
+    # l'associazione utente↔consumo è compito del middleware (via device_id/building_id).
     building_id, device_id, asset_name = _cfg_ids(device)
-    cfg = getattr(device, "config", None) or {}
     return {
         "device_id": device_id,
         "building_id": _coerce_building_id(building_id),
         "asset_name": asset_name,
-        "client_mail": cfg.get("client_mail"),
     }
 
 
@@ -201,9 +201,7 @@ def expand_readings_for_gateway_export(
 ) -> List[Dict[str, Any]]:
     """
     Formato uscita per protocollo (come da specifica integrazione):
-    - Modbus TCP/RTU e M-Bus: measure, value, unit, device_id, building_id,
-      asset_name, client_mail
-    - KNX: measure, value, unit, device_id, building_id, asset_name, client_mail
+    measure, value, unit, device_id, building_id, asset_name — nessun dato utente.
     """
     protocol = protocol_for_device(device)
     ctx = _common_telemetry_context(device)

@@ -115,10 +115,10 @@ def _prefer_ipv4_localhost_url(url: str) -> str:
     return urlunparse((p.scheme, new_netloc, p.path, p.params, p.query, p.fragment))
 
 
-def resolve_web_login_url(remote_config_url: str) -> str:
+def resolve_web_token_url(remote_config_url: str) -> str:
     """
-    Da REMOTE_CONFIG_URL (es. http://host/app/api/config) → http://host/app/api/auth/login
-    Accetta anche .../config/{id} nel .env: usa il prefisso prima di {id}.
+    Da REMOTE_CONFIG_URL (es. http://host/app/api/config) → http://host/app/api/auth/token
+    (endpoint client_credentials della web app). Accetta anche .../config/{id} nel .env.
     """
     raw = (remote_config_url or "").strip().rstrip("/")
     if "{id}" in raw or "{building_id}" in raw:
@@ -129,31 +129,7 @@ def resolve_web_login_url(remote_config_url: str) -> str:
         base = raw.split("/app/api/config")[0].rstrip("/") + "/app/api"
     else:
         base = raw.rstrip("/")
-    return _prefer_ipv4_localhost_url(f"{base}/auth/login")
-
-
-def fetch_web_access_token(login_url: str, username: str, password: str, timeout: float = 12.0) -> str:
-    """
-    POST /app/api/auth/login (ProgettoTesi) → access_token Bearer per GET config e upload verso web/middleware.
-    """
-    url = _prefer_ipv4_localhost_url(login_url.strip())
-    try:
-        r = requests.post(
-            url,
-            json={"username": username.strip(), "password": password},
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, dict):
-            raise ValueError("Risposta login non è un oggetto JSON")
-        tok = (data.get("access_token") or data.get("accessToken") or "").strip()
-        if not tok:
-            raise ValueError("Risposta login senza access_token")
-        return tok
-    except requests.RequestException as e:
-        raise ValueError(f"Login web non riuscito ({url}): {e}") from e
+    return _prefer_ipv4_localhost_url(f"{base}/auth/token")
 
 
 def normalize_remote_gateway_config(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -221,7 +197,6 @@ def load_config() -> Dict[str, Any]:
         upload_interval = 30
 
     upload_format = (os.getenv("DATA_UPLOAD_FORMAT") or "web").strip().lower()
-    upload_token = (os.getenv("DATA_UPLOAD_TOKEN") or "").strip()
     gateway_ingest_secret = (os.getenv("GATEWAY_INGEST_SECRET") or "").strip()
     # Allineato al default dev del middleware (JwtAuthenticationFilter) quando app.gateway-ingest.secret è vuoto.
     _default_local_ingest = "dev-gateway-ingest-secret"
@@ -230,19 +205,22 @@ def load_config() -> Dict[str, Any]:
         "id_condominio": (os.getenv("ID_CONDOMINIO") or "").strip() or None,
         "remote_config": {
             "url": (os.getenv("REMOTE_CONFIG_URL") or "").strip() or None,
-            "token": os.getenv("REMOTE_CONFIG_TOKEN"),
+        },
+        # Credenziali di macchina (Client Credentials): NIENTE JWT statico nel .env.
+        # Il JWT viene scambiato all'avvio e mantenuto solo in RAM (modules/web_auth.py).
+        "web_auth": {
+            "token_url": (os.getenv("WEB_AUTH_TOKEN_URL") or "").strip() or None,
+            "client_id": (os.getenv("GATEWAY_CLIENT_ID") or "").strip() or None,
+            "client_secret": (os.getenv("GATEWAY_CLIENT_SECRET") or "").strip() or None,
         },
         "data_upload": {
             "url": _prefer_ipv4_localhost_url(
                 (os.getenv("DATA_UPLOAD_URL") or "").strip()
             )
             or None,
-            # Con middleware: Bearer = REMOTE_CONFIG_TOKEN / DATA_UPLOAD_TOKEN; oppure (meglio in dev) anche GATEWAY_INGEST_SECRET
-            # perché il server controlla prima X-Gateway-Ingest-Token (= app.gateway-ingest.secret).
-            "token": upload_token or None,
             "upload_interval_seconds": upload_interval,
             # web = batch {gateway_id, data:[...]} verso ProgettoTesi telemetry;
-            # middleware = array piatta ConsumoIngestItem verso POST .../api/consumi
+            # middleware = array piatta di consumi verso POST .../api/consumi
             "format": upload_format,
             # Se valorizzato con middleware: header X-Gateway-Ingest-Token (stesso valore di app.gateway-ingest.secret)
             "gateway_ingest_secret": gateway_ingest_secret or None,
@@ -254,34 +232,16 @@ def load_config() -> Dict[str, Any]:
     if not config["remote_config"]["url"]:
         raise ValueError("Errore: REMOTE_CONFIG_URL non è impostato nel file .env.")
     config["remote_config"]["url"] = _prefer_ipv4_localhost_url(config["remote_config"]["url"])
-    token = (config["remote_config"].get("token") or "").strip()
-    if not token:
-        # Credenziali admin web (stesso login form / API della ProgettoTesi): il gateway ottiene il JWT all'avvio.
-        login_user = (
-            (os.getenv("WEB_ADMIN_EMAIL") or "").strip()
-            or (os.getenv("GATEWAY_WEB_USERNAME") or "").strip()
+
+    if not config["web_auth"]["client_id"] or not config["web_auth"]["client_secret"]:
+        raise ValueError(
+            "Errore: credenziali di macchina mancanti. Imposta nel .env GATEWAY_CLIENT_ID e GATEWAY_CLIENT_SECRET "
+            "(da generare sulla web app: POST /app/api/buildings/{id}/gateway-credentials con JWT admin). "
+            "Opzionale WEB_AUTH_TOKEN_URL se l'endpoint token non è deducibile da REMOTE_CONFIG_URL."
         )
-        login_pw = (os.getenv("WEB_ADMIN_PASSWORD") or os.getenv("GATEWAY_WEB_PASSWORD") or "").strip()
-        login_url = (os.getenv("WEB_AUTH_LOGIN_URL") or "").strip()
-        if login_user and login_pw:
-            if not login_url:
-                login_url = resolve_web_login_url(config["remote_config"]["url"] or "")
-            _log.info(
-                "REMOTE_CONFIG_TOKEN assente — ottengo JWT con login web (%s, utente=%s).",
-                login_url,
-                login_user,
-            )
-            print(f"Login web per token JWT → {login_url} (utente={login_user})")
-            token = fetch_web_access_token(login_url, login_user, login_pw)
-            _log.info("JWT web ottenuto (lunghezza %s).", len(token))
-        else:
-            raise ValueError(
-                "Errore: nessun token per la config remota. Imposta nel .env uno tra: "
-                "(1) REMOTE_CONFIG_TOKEN (JWT da POST /app/api/auth/login), oppure "
-                "(2) WEB_ADMIN_EMAIL + WEB_ADMIN_PASSWORD (o GATEWAY_WEB_USERNAME + GATEWAY_WEB_PASSWORD) "
-                "per scaricare il JWT all'avvio; opzionale WEB_AUTH_LOGIN_URL se l'URL di login non è deducibile da REMOTE_CONFIG_URL."
-            )
-    config["remote_config"]["token"] = token
+    if not config["web_auth"]["token_url"]:
+        config["web_auth"]["token_url"] = resolve_web_token_url(config["remote_config"]["url"])
+
     if not config["data_upload"]["url"]:
         raise ValueError("Errore: DATA_UPLOAD_URL non è impostato nel file .env.")
 
