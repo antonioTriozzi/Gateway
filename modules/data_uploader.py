@@ -12,20 +12,6 @@ from .web_auth import WebAppAuthClient, WebAppAuthError
 
 log = logging.getLogger(__name__)
 
-# Stesso nome header del middleware (GatewayIngestTokenFilter).
-INGEST_HEADER = "X-Gateway-Ingest-Token"
-
-
-def _normalize_ingest_secret(raw: Optional[str]) -> str:
-    """Allinea BOM / trattini Unicode a quanto fa {@code normalizeIngestToken} sul middleware."""
-    if not raw:
-        return ""
-    t = raw.strip().replace("\ufeff", "")
-    for ch in ("\u2011", "\u2010", "\u2212"):
-        t = t.replace(ch, "-")
-    t = t.replace("\u00ad", "")
-    return t
-
 
 def _prefer_ipv4_localhost(api_url: str) -> str:
     """Su Windows `localhost` può risolvere in ::1 mentre il server è solo su 127.0.0.1."""
@@ -60,20 +46,14 @@ class DataUploader:
         self.upload_interval = uploader_config.get("upload_interval_seconds", 60)
         self.upload_format = str(uploader_config.get("format") or "web").strip().lower()
 
-        secret = _normalize_ingest_secret((uploader_config.get("gateway_ingest_secret") or "").strip())
-        if not secret:
-            secret = _normalize_ingest_secret((os.getenv("GATEWAY_INGEST_SECRET") or "").strip())
-        self.gateway_ingest_secret = secret or None
-
         self.gateway_id = config.get("id_condominio")
 
         # JWT M2M dinamico (client_credentials): mai statico, mai su file.
         self._auth = auth
 
         log.info(
-            "DataUploader: format=%s ingest_secret=%s auth_m2m=%s url=%s",
+            "DataUploader: format=%s auth_m2m=%s url=%s",
             self.upload_format,
-            "sì" if self.gateway_ingest_secret else "no",
             "sì" if (self._auth and self._auth.configured) else "no",
             self.api_url or "(mancante)",
         )
@@ -94,15 +74,12 @@ class DataUploader:
 
     def _post_headers(self) -> Dict[str, str]:
         """
-        Middleware: header `X-Gateway-Ingest-Token` (= GATEWAY_INGEST_SECRET) + eventuale Bearer M2M.
-        Web: Bearer M2M (JWT client_credentials, ruolo GATEWAY).
+        Middleware e web: Bearer M2M (JWT client_credentials, ROLE_GATEWAY) dalla web app.
         """
         h: Dict[str, str] = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if self.upload_format == "middleware" and self.gateway_ingest_secret:
-            h[INGEST_HEADER] = self.gateway_ingest_secret
         token = self._bearer_token()
         if token:
             h["Authorization"] = f"Bearer {token}"
@@ -118,14 +95,15 @@ class DataUploader:
             return 0
         if self.upload_format != "middleware" and not self.gateway_id:
             return 0
-        if self.upload_format == "middleware" and not (
-            self.gateway_ingest_secret or (self._auth and self._auth.configured)
-        ):
-            log.error(
-                "Upload middleware: impostare GATEWAY_INGEST_SECRET oppure le credenziali M2M "
-                "(GATEWAY_CLIENT_ID + GATEWAY_CLIENT_SECRET)."
-            )
-            return 0
+        if self.upload_format == "middleware":
+            if not (self._auth and self._auth.configured):
+                log.error(
+                    "Upload middleware: credenziali M2M obbligatorie "
+                    "(GATEWAY_CLIENT_ID + GATEWAY_CLIENT_SECRET nel .env)."
+                )
+                return 0
+            if not self._bearer_token():
+                return 0
 
         async with self._flush_lock:
             try:
@@ -205,9 +183,9 @@ class DataUploader:
                 detail = (e.response.text or "").strip()
                 if e.response.status_code == 401 and self.upload_format == "middleware":
                     log.error(
-                        "Upload middleware 401 (anche dopo rinnovo token): verificare GATEWAY_INGEST_SECRET = "
-                        "app.gateway-ingest.secret sul middleware, oppure le credenziali M2M "
-                        "(GATEWAY_CLIENT_ID/GATEWAY_CLIENT_SECRET). Dettaglio: %s | headers risposta: %s",
+                        "Upload middleware 401 (anche dopo rinnovo token): verificare GATEWAY_CLIENT_ID/"
+                        "GATEWAY_CLIENT_SECRET e che app.web-app.jwt.secret sul middleware = jwt.secret web app. "
+                        "Dettaglio: %s | headers risposta: %s",
                         detail[:500] if detail else "(vuoto)",
                         dict(e.response.headers),
                     )

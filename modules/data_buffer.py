@@ -1,6 +1,12 @@
 import sqlite3
 import json
+from datetime import datetime, timezone
 from typing import List, Dict, Any
+
+
+def utc_timestamp_iso() -> str:
+    """UTC esplicito (SQLite CURRENT_TIMESTAMP è UTC ma senza 'Z' confonde parser/UI)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 class DataBuffer:
     def __init__(self, db_path: str = "buffer.db"):
@@ -38,10 +44,11 @@ class DataBuffer:
                 print(f"INFO: Pruned {deleted} old records from buffer.")
 
     def save_readings(self, device_name: str, readings: List[Dict[str, Any]]):
+        ts = utc_timestamp_iso()
         with self.conn:
             self.conn.execute(
-                "INSERT INTO readings (device_name, data) VALUES (?, ?)",
-                (device_name, json.dumps(readings))
+                "INSERT INTO readings (device_name, timestamp, data) VALUES (?, ?, ?)",
+                (device_name, ts, json.dumps(readings)),
             )
 
     def get_pending_readings(self, limit: int = 100) -> List[Dict[str, Any]]:

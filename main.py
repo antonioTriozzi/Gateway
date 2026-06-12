@@ -89,7 +89,7 @@ async def main():
     
     logging.info("Configurazione remota pronta per l'uso (da server o cache).")
 
-    # Preferisci valori .env (upload URL, GATEWAY_INGEST_SECRET, …) su eventuali chiavi omonime nel JSON remoto.
+    # Preferisci valori .env (upload URL, credenziali M2M, …) su eventuali chiavi omonime nel JSON remoto.
     full_config = {**remote_conf, **local_config}
 
     buffer = DataBuffer()

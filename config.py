@@ -197,9 +197,6 @@ def load_config() -> Dict[str, Any]:
         upload_interval = 30
 
     upload_format = (os.getenv("DATA_UPLOAD_FORMAT") or "web").strip().lower()
-    gateway_ingest_secret = (os.getenv("GATEWAY_INGEST_SECRET") or "").strip()
-    # Allineato al default dev del middleware (JwtAuthenticationFilter) quando app.gateway-ingest.secret è vuoto.
-    _default_local_ingest = "dev-gateway-ingest-secret"
 
     config = {
         "id_condominio": (os.getenv("ID_CONDOMINIO") or "").strip() or None,
@@ -222,8 +219,6 @@ def load_config() -> Dict[str, Any]:
             # web = batch {gateway_id, data:[...]} verso ProgettoTesi telemetry;
             # middleware = array piatta di consumi verso POST .../api/consumi
             "format": upload_format,
-            # Se valorizzato con middleware: header X-Gateway-Ingest-Token (stesso valore di app.gateway-ingest.secret)
-            "gateway_ingest_secret": gateway_ingest_secret or None,
         },
     }
 
@@ -244,16 +239,6 @@ def load_config() -> Dict[str, Any]:
 
     if not config["data_upload"]["url"]:
         raise ValueError("Errore: DATA_UPLOAD_URL non è impostato nel file .env.")
-
-    if upload_format == "middleware" and not gateway_ingest_secret:
-        u = (config["data_upload"]["url"] or "").lower()
-        if "127.0.0.1" in u or "localhost" in u:
-            config["data_upload"]["gateway_ingest_secret"] = _default_local_ingest
-            print(
-                f"Attenzione: GATEWAY_INGEST_SECRET assente — per POST verso host locale uso X-Gateway-Ingest-Token="
-                f"'{_default_local_ingest}' (stesso default del middleware in dev). Aggiungi GATEWAY_INGEST_SECRET al .env "
-                "se il middleware usa un segreto diverso."
-            )
 
     return config
 
