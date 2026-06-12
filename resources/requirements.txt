@@ -1,0 +1,11 @@
+# Gateway IoT (Python 3.10+) — Raspberry Pi / Linux
+# Installazione: pip install -r resources/requirements.txt
+# Copia anche .env dalla root del progetto prima dell'avvio.
+
+pymodbus>=3.0.0,<4
+python-dotenv>=1.0.0
+httpx>=0.27.0
+requests>=2.31.0
+pyserial>=3.5
+pyMeterBus>=0.8.4
+xknx>=3.0.0,<4
