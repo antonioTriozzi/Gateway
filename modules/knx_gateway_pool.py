@@ -136,11 +136,11 @@ class KnxGatewayHandle:
                 )
 
     async def stop(self) -> None:
-        if self._started:
-            try:
+        try:
+            if self.xknx.started.is_set():
                 await self.xknx.stop()
-            except Exception as e:
-                log.debug("KNX stop: %s", e)
+        except Exception as e:
+            log.debug("KNX stop: %s", e)
         self._started = False
         self._connection_failed = False
         self._next_retry_at = None

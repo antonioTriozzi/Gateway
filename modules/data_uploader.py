@@ -118,6 +118,12 @@ class DataUploader:
                     if not payload:
                         log.warning("Formato middleware: nessuna misura nel batch, skip upload.")
                         return 0
+                    sample_ts = payload[0].get("timestamp")
+                    log.info(
+                        "Middleware batch: %s righe, es. timestamp=%s (atteso formato UTC con Z)",
+                        len(payload),
+                        sample_ts,
+                    )
                 else:
                     payload = self._build_payload(pending_data)
 

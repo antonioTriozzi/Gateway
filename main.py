@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import signal
 import sys
 import time
 
@@ -28,6 +29,25 @@ from modules.data_buffer import DataBuffer
 from modules.data_uploader import DataUploader
 from modules.web_auth import WebAppAuthClient, WebAppAuthError
 
+
+def _quiet_keyboard_interrupt(exc_type, exc_value, exc_tb):
+    if exc_type is KeyboardInterrupt:
+        logging.getLogger().info("Applicazione terminata.")
+        return
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+async def _interruptible_sleep(seconds: float, shutdown: asyncio.Event) -> bool:
+    """Attende fino a `seconds`; True se è stato richiesto lo shutdown."""
+    if seconds <= 0:
+        return shutdown.is_set()
+    try:
+        await asyncio.wait_for(shutdown.wait(), timeout=seconds)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
 def setup_logging():
     """Configura il logging per l'applicazione."""
     log = logging.getLogger()
@@ -41,6 +61,8 @@ def setup_logging():
     # pymodbus: messaggi ERROR su connect / I/O (spesso ridondanti con i nostri WARNING).
     logging.getLogger("pymodbus.logging").setLevel(logging.CRITICAL)
     logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
+    # xknx.__del__ può loggare WARNING se il loop è già chiuso dopo asyncio.run().
+    logging.getLogger("xknx").setLevel(logging.ERROR)
 
 async def main():
     setup_logging()
@@ -127,7 +149,24 @@ async def main():
         max_workers=io_workers,
         thread_name_prefix="gw_io",
     )
-    asyncio.get_running_loop().set_default_executor(io_executor)
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(io_executor)
+
+    shutdown = asyncio.Event()
+
+    def _request_shutdown() -> None:
+        if shutdown.is_set():
+            logging.info("Arresto forzato.")
+            os._exit(0)
+        logging.info("Interruzione ricevuta, arresto in corso…")
+        shutdown.set()
+
+    try:
+        loop.add_signal_handler(signal.SIGINT, _request_shutdown)
+        loop.add_signal_handler(signal.SIGTERM, _request_shutdown)
+    except (NotImplementedError, RuntimeError, ValueError):
+        pass
+
     logging.info(
         "Pool thread I/O: %s worker (I/O bloccante in thread; letture dispositivi sequenziali per ciclo).",
         io_workers,
@@ -164,7 +203,7 @@ async def main():
             return []
 
     try:
-        while True:
+        while not shutdown.is_set():
             cycle_started = time.monotonic()
             try:
                 logging.info("--- Inizio ciclo di lettura (sequenziale: una lettura per dispositivo) ---")
@@ -172,6 +211,8 @@ async def main():
                 active_devices = [d for d in devices if d.enabled]
                 if active_devices:
                     for device in active_devices:
+                        if shutdown.is_set():
+                            break
                         try:
                             res = await read_with_timeout(device)
                         except Exception as e:
@@ -199,13 +240,16 @@ async def main():
                             )
                             logging.info("TELEMETRY %s", format_telemetry_log_line(doc))
 
-                    await uploader.flush_pending()
+                    if not shutdown.is_set():
+                        await uploader.flush_pending()
 
                 else:
                     logging.info(
                         "Nessun dispositivo attivo: ciclo a vuoto, il loop continua."
                     )
             finally:
+                if shutdown.is_set():
+                    break
                 elapsed_after_read = time.monotonic() - cycle_started
                 read_padding = max(0.0, read_phase - elapsed_after_read)
                 if read_padding > 0:
@@ -214,7 +258,8 @@ async def main():
                         read_padding,
                         read_phase,
                     )
-                await asyncio.sleep(read_padding)
+                if await _interruptible_sleep(read_padding, shutdown):
+                    break
                 after_read_window = time.monotonic() - cycle_started
                 pause = max(0.0, cycle_total - after_read_window)
                 logging.info(
@@ -225,28 +270,24 @@ async def main():
                     pause,
                     cycle_total,
                 )
-                await asyncio.sleep(pause)
+                if await _interruptible_sleep(pause, shutdown):
+                    break
 
-                if buffer.count_pending() > 0:
+                if not shutdown.is_set() and buffer.count_pending() > 0:
                     await uploader.flush_pending()
 
-    except asyncio.CancelledError:
-        logging.info("Loop principale in fase di chiusura.")
-    except KeyboardInterrupt:
-        logging.info("Interruzione da tastiera ricevuta.")
     finally:
         logging.info("Arresto dei servizi...")
-        await KnxGatewayPool.stop_all()
         try:
-            ex = asyncio.get_running_loop().get_default_executor()
-            if isinstance(ex, concurrent.futures.ThreadPoolExecutor):
-                ex.shutdown(wait=False, cancel_futures=True)
-        except RuntimeError:
-            pass
+            await KnxGatewayPool.stop_all()
+        except Exception as e:
+            logging.debug("Stop KNX: %s", e)
+        io_executor.shutdown(wait=False, cancel_futures=True)
         logging.info("Gateway arrestato.")
 
 if __name__ == "__main__":
+    sys.excepthook = _quiet_keyboard_interrupt
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Applicazione terminata.")
+        pass
