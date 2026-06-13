@@ -172,8 +172,20 @@ class MBusMeter(BaseDevice):
                 timeout,
             )
 
+        port_s = (port or "").strip()
+        if "://" in port_s:
+            # TCP bridge (socket://192.168.8.115:9000): serial_for_url, non Serial(COM...)
+            net_timeout = max(timeout, 5.0)
+            log.debug(
+                "M-Bus '%s': apertura %s (timeout %.1fs, baud ignorato su TCP).",
+                self.name,
+                port_s,
+                net_timeout,
+            )
+            return serial.serial_for_url(port_s, timeout=net_timeout)
+
         return serial.Serial(
-            port=port,
+            port=port_s,
             baudrate=int(baudrate),
             parity=par,
             stopbits=serial.STOPBITS_ONE,
@@ -198,6 +210,14 @@ class MBusMeter(BaseDevice):
         baudrate = getattr(self.client, "baudrate", 2400)
         data = self._sync_read(port, baudrate)
         if not data:
+            if target_measures:
+                log.warning(
+                    "M-Bus '%s': nessun telegramma su %s (slave %s). "
+                    "Verifica sim+mirror sul PC, firewall TCP 9000, MBUS_SOCKET_URL sulla Pi.",
+                    self.name,
+                    port,
+                    self.slave_id,
+                )
             return self._placeholder_results()
 
         records = _mbus_data_records(data)
@@ -327,13 +347,19 @@ class MBusMeter(BaseDevice):
                         return parsed
 
             meterbus.send_request_frame(ser, self.slave_id)
-            for _ in range(10):
+            for _ in range(20):
                 raw = meterbus.recv_frame(ser)
                 if not raw or raw is False:
                     continue
                 parsed = _mbus_load_frame(raw)
                 if isinstance(parsed, TelegramLong):
                     return parsed
+            log.warning(
+                "M-Bus '%s': REQ_UD senza RSP_UD su %s (slave %s).",
+                self.name,
+                port,
+                self.slave_id,
+            )
             return None
         except Exception as e:
             log.warning(
