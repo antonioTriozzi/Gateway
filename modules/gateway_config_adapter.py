@@ -26,6 +26,29 @@ def _sanitize_key(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(s))
 
 
+def parse_knx_host_port(host_raw: Any, port_raw: Any) -> tuple[str, int]:
+    """
+    Host e porta KNX separati (come Modbus TCP).
+    Se host è ``192.168.8.115:3672``, la porta nel host prevale sul campo port.
+    """
+    host = str(host_raw or "127.0.0.1").strip()
+    try:
+        default_port = int(port_raw or 3671)
+    except (TypeError, ValueError):
+        default_port = 3671
+    if not host:
+        host = "127.0.0.1"
+    colon = host.rfind(":")
+    if colon > 0 and colon < len(host) - 1:
+        maybe_port = host[colon + 1:].strip()
+        if maybe_port.isdigit():
+            p = int(maybe_port)
+            if 0 < p <= 65535:
+                base = host[:colon].strip()
+                return (base or "127.0.0.1", p)
+    return host, default_port
+
+
 def _is_web_style_inventory(inventory: List[Any]) -> bool:
     for d in inventory:
         if isinstance(d, dict) and (d.get("driver_ref") or d.get("comm_protocol")):
@@ -158,11 +181,7 @@ def apply_progettotesi_device_plumbing(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 except (TypeError, ValueError):
                     sp = 3671
                 g = {"host": str(serial.get("host")).strip(), "port": sp}
-            host = (g.get("host") or "127.0.0.1").strip()
-            try:
-                kport = int(g.get("port") or 3671)
-            except (TypeError, ValueError):
-                kport = 3671
+            host, kport = parse_knx_host_port(g.get("host"), g.get("port"))
             tc_g = coerce_optional_bool(g.get("tunnel_tcp"))
             tunnel_tcp = tc_g if tc_g is not None else default_knx_tunnel_tcp
             iface = f"knx_{_sanitize_key(host)}_{kport}"

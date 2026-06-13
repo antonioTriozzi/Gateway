@@ -8,7 +8,7 @@ from modules.devices.base_device import BaseDevice
 from modules.devices.knx_meter import KnxMeter
 from modules.devices.modbus_meter import ModbusMeter
 from modules.devices.mbus_meter import MBusMeter
-from modules.gateway_config_adapter import resolve_driver
+from modules.gateway_config_adapter import parse_knx_host_port, resolve_driver
 from modules.gateway_device_config import merge_gateway_device_config
 from modules.knx_gateway_pool import KnxGatewayPool
 from modules.serial_manager import SerialManager
@@ -85,8 +85,7 @@ class DeviceManager:
                     out[name] = ("mbus", binding, lock)
                     logging.info("M-Bus %s → %s @ %s", name, port, baud)
                 elif transport == "knx":
-                    host = (spec.get("host") or "127.0.0.1").strip()
-                    kport = int(spec.get("port") or 3671)
+                    host, kport = parse_knx_host_port(spec.get("host"), spec.get("port"))
                     utcp = spec.get("tunnel_tcp")
                     handle = (
                         KnxGatewayPool.instance(host, kport, use_tcp=bool(utcp))
