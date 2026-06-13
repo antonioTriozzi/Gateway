@@ -181,6 +181,16 @@ class MBusMeter(BaseDevice):
             timeout=timeout,
         )
 
+    def _placeholder_results(self) -> List[Dict[str, Any]]:
+        targets = self.config.get("target_measures") or []
+        if not targets:
+            return []
+        return [
+            {"name": str(m), "value": None, "unit": ""}
+            for m in targets
+            if str(m).strip()
+        ]
+
     def _read_all_sync(self) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
         target_measures = self.config.get("target_measures") or []
@@ -188,7 +198,7 @@ class MBusMeter(BaseDevice):
         baudrate = getattr(self.client, "baudrate", 2400)
         data = self._sync_read(port, baudrate)
         if not data:
-            return results
+            return self._placeholder_results()
 
         records = _mbus_data_records(data)
 

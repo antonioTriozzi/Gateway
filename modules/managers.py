@@ -76,6 +76,15 @@ class DeviceManager:
                     logging.info("Modbus RTU %s → %s @ %s", name, port, baud)
                 elif transport == "mbus":
                     port = (spec.get("port") or "").strip()
+                    env_url = (os.getenv("MBUS_SOCKET_URL") or "").strip()
+                    if env_url:
+                        log.info(
+                            "M-Bus %s: porta config %r sostituita da MBUS_SOCKET_URL=%s",
+                            name,
+                            port or "?",
+                            env_url,
+                        )
+                        port = env_url
                     if not port:
                         logging.error("Interfaccia %s: porta M-Bus mancante.", name)
                         continue
