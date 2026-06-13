@@ -21,13 +21,23 @@ def _env_use_knx_tcp() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _is_local_knx_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    return h in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+
+
 def _knx_route_back(host: str) -> bool:
     """
-    UDP tunnel via relay (socat): route_back=True rompe il tunnel su 192.168.8.115:3672.
-    Solo se esplicito KNX_ROUTE_BACK=true nel .env (default OFF).
+  UDP tunnel via relay/mirror (Pi -> PC:3672 -> KV:3671): serve route_back così
+  le richieste CEMI non vanno a 127.0.0.1:3671 sulla Pi.
+  Override: KNX_ROUTE_BACK=true|false nel .env.
     """
     v = (os.getenv("KNX_ROUTE_BACK") or "").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return not _is_local_knx_host(host)
 
 
 def _knx_reconnect_interval_seconds() -> float:
