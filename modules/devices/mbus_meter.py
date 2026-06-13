@@ -238,7 +238,7 @@ class MBusMeter(BaseDevice):
         results: List[Dict[str, Any]] = []
         target_measures = self.config.get("target_measures") or []
         port = resolve_mbus_port(
-            getattr(client, "port", None) or self._mbus_port or ""
+            getattr(self.client, "port", None) or self._mbus_port or ""
         )
         baudrate = getattr(self.client, "baudrate", 2400)
         data = self._sync_read(port, baudrate)
