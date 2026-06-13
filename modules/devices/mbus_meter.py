@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,31 @@ except ImportError:
     meterbus = None
 
 log = logging.getLogger(__name__)
+
+
+def resolve_mbus_port(config_port: str | None) -> str:
+    """
+    Porta effettiva M-Bus: MBUS_SOCKET_URL nel .env, oppure su Linux/Pi
+    COM1/COM2 dalla Web App -> socket://PC_IP:9000 (sim+mirror sul PC).
+    """
+    env_url = (os.getenv("MBUS_SOCKET_URL") or "").strip()
+    if env_url:
+        return env_url
+    port = (config_port or "").strip()
+    if not port:
+        return port
+    if os.name != "nt" and re.match(r"^COM\d+$", port, re.I):
+        pc_ip = (os.getenv("PC_IP") or "").strip()
+        tcp_port = (os.getenv("MBUS_TCP_PORT") or "9000").strip()
+        if pc_ip:
+            url = f"socket://{pc_ip}:{tcp_port}"
+            log.info(
+                "M-Bus: porta Windows %s su Pi -> %s (PC_IP / mirror TCP).",
+                port,
+                url,
+            )
+            return url
+    return port
 
 
 def _mbus_description_matches_targets(label: str, targets: List[Any]) -> bool:
@@ -123,13 +149,18 @@ class MBusMeter(BaseDevice):
         port = getattr(client, "port", None)
         if hasattr(client, "comm_params"):
             port = client.comm_params.port
-        port = port or ""
+        port = resolve_mbus_port(port or "")
         self._mbus_port = str(port)
         self._mbus_tlock = (
             TransportRegistry.mbus_thread_lock(self._mbus_port) if self._mbus_port else None
         )
 
-        log.info("Dispositivo M-Bus '%s' pronto all'indirizzo %s.", self.name, self.slave_id)
+        log.info(
+            "Dispositivo M-Bus '%s' pronto su %s, indirizzo slave %s.",
+            self.name,
+            self._mbus_port,
+            self.slave_id,
+        )
 
     def telemetry_protocol(self) -> str:
         return "mbus"
@@ -206,7 +237,9 @@ class MBusMeter(BaseDevice):
     def _read_all_sync(self) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
         target_measures = self.config.get("target_measures") or []
-        port = getattr(self.client, "port", None)
+        port = resolve_mbus_port(
+            getattr(client, "port", None) or self._mbus_port or ""
+        )
         baudrate = getattr(self.client, "baudrate", 2400)
         data = self._sync_read(port, baudrate)
         if not data:

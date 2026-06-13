@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 from modules.devices.base_device import BaseDevice
 from modules.devices.knx_meter import KnxMeter
 from modules.devices.modbus_meter import ModbusMeter
-from modules.devices.mbus_meter import MBusMeter
+from modules.devices.mbus_meter import MBusMeter, resolve_mbus_port
 from modules.gateway_config_adapter import parse_knx_host_port, resolve_driver
 from modules.gateway_device_config import merge_gateway_device_config
 from modules.knx_gateway_pool import KnxGatewayPool
@@ -75,16 +75,7 @@ class DeviceManager:
                     out[name] = ("modbus", client, lock)
                     logging.info("Modbus RTU %s → %s @ %s", name, port, baud)
                 elif transport == "mbus":
-                    port = (spec.get("port") or "").strip()
-                    env_url = (os.getenv("MBUS_SOCKET_URL") or "").strip()
-                    if env_url:
-                        log.info(
-                            "M-Bus %s: porta config %r sostituita da MBUS_SOCKET_URL=%s",
-                            name,
-                            port or "?",
-                            env_url,
-                        )
-                        port = env_url
+                    port = resolve_mbus_port((spec.get("port") or "").strip())
                     if not port:
                         logging.error("Interfaccia %s: porta M-Bus mancante.", name)
                         continue
