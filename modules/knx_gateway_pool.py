@@ -21,6 +21,15 @@ def _env_use_knx_tcp() -> bool:
     return v in ("1", "true", "yes", "on")
 
 
+def _knx_route_back(host: str) -> bool:
+    """
+    UDP tunnel via relay (socat): route_back=True rompe il tunnel su 192.168.8.115:3672.
+    Solo se esplicito KNX_ROUTE_BACK=true nel .env (default OFF).
+    """
+    v = (os.getenv("KNX_ROUTE_BACK") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _knx_reconnect_interval_seconds() -> float:
     try:
         return max(5.0, float(os.getenv("KNX_RECONNECT_INTERVAL_SECONDS", "60")))
@@ -36,12 +45,14 @@ class KnxGatewayHandle:
         self._start_lock = asyncio.Lock()
         tcp = _env_use_knx_tcp() if use_tcp is None else bool(use_tcp)
         self._use_tcp = tcp
+        self._route_back = _knx_route_back(self.host)
         conn_type = ConnectionType.TUNNELING_TCP if tcp else ConnectionType.TUNNELING
         self.xknx = XKNX(
             connection_config=ConnectionConfig(
                 connection_type=conn_type,
                 gateway_ip=self.host,
                 gateway_port=self.port,
+                route_back=self._route_back,
             )
         )
         self._started = False
@@ -93,6 +104,12 @@ class KnxGatewayHandle:
                 self._connection_failed = False
                 self._next_retry_at = None
                 log.info("KNX tunnel avviato verso %s:%s", self.host, self.port)
+                if not self._use_tcp and self._route_back:
+                    log.info(
+                        "KNX UDP route_back attivo (relay/NAT verso %s:%s).",
+                        self.host,
+                        self.port,
+                    )
             except CommunicationError as e:
                 self._connection_failed = True
                 self._next_retry_at = time.monotonic() + _knx_reconnect_interval_seconds()
