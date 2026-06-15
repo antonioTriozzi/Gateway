@@ -5,26 +5,25 @@
 set -e
 cd "$(dirname "$0")/.."
 
-echo "=== .env lab (PC mirror) ==="
-grep -E '^(PC_IP|MBUS_SOCKET_URL|MODBUS_RTU_SOCKET_URL|MODBUS_TCP_URL)=' .env 2>/dev/null || echo "[!] .env mancante o variabili assenti"
+echo "=== .env lab ==="
+grep -E '^PC_IP=' .env 2>/dev/null || echo "[!] PC_IP mancante in .env"
 
 echo ""
-echo "=== Codice remap Modbus ==="
-if grep -q resolve_modbus_rtu_port modules/modbus_lab_resolve.py 2>/dev/null; then
-    echo "OK: modbus_lab_resolve.py presente"
-elif grep -q resolve_modbus_rtu_port modules/devices/modbus_meter.py; then
-    echo "OK: remap in modbus_meter.py (vecchio layout)"
+echo "=== Codice remap (PC_IP) ==="
+if test -f modules/modbus_lab_resolve.py; then
+    echo "OK: modbus_lab_resolve.py"
 else
-    echo "[!] VECCHIO CODICE: aggiorna gateway dal PC (scripts/sync_to_pi.ps1)"
+    echo "[!] VECCHIO CODICE: aggiorna gateway dal PC"
 fi
 
 echo ""
-echo "=== Reachability PC (192.168.8.115) ==="
-PC="${PC_IP:-192.168.8.115}"
+echo "=== Reachability PC ==="
+PC="$(grep -E '^PC_IP=' .env 2>/dev/null | cut -d= -f2- | tr -d ' ')"
+PC="${PC:-192.168.8.115}"
 for port in 9000 502 9010; do
     if timeout 2 bash -c "echo >/dev/tcp/$PC/$port" 2>/dev/null; then
         echo "OK  TCP $PC:$port"
     else
-        echo "[!] TCP $PC:$port non raggiungibile (mirror/sim spenti sul PC?)"
+        echo "[!] TCP $PC:$port non raggiungibile (mirror/sim sul PC?)"
     fi
 done

@@ -29,7 +29,7 @@ def _sanitize_key(s: str) -> str:
 def apply_modbus_lab_mirror_resolve(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Su Pi/Linux: risolve interfacce Modbus dalla Web App (127.0.0.1, COM3)
-    verso PC_IP e porte mirror (come MBUS_SOCKET_URL per M-Bus).
+    verso PC_IP e porte mirror (come resolve_mbus_port per M-Bus).
     """
     from modules.modbus_lab_resolve import (
         resolve_modbus_rtu_port,

@@ -34,6 +34,6 @@ foreach ($item in $items) {
 
 Write-Host ""
 Write-Host "Fatto. Sulla Pi:"
-Write-Host "  1) Allinea .env (PC_IP, MBUS_SOCKET_URL, MODBUS_RTU_SOCKET_URL, MODBUS_TCP_URL)"
+Write-Host "  1) .env sulla Pi con PC_IP=192.168.8.115 (nessun MBUS/MODBUS socket URL)"
 Write-Host "  2) grep resolve_modbus $PiPath/modules/devices/modbus_meter.py"
 Write-Host "  3) Riavvia il gateway"

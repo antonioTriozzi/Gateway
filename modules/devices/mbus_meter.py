@@ -25,19 +25,21 @@ log = logging.getLogger(__name__)
 
 def resolve_mbus_port(config_port: str | None) -> str:
     """
-    Porta effettiva M-Bus: MBUS_SOCKET_URL nel .env, oppure su Linux/Pi
-    COM1/COM2 dalla Web App -> socket://PC_IP:9000 (sim+mirror sul PC).
+    Porta effettiva M-Bus su Pi/Linux: COM1/COM2 o socket://127.0.0.1:… dalla Web App
+    -> socket://PC_IP:9000 (sim + mirror sul PC). Richiede solo PC_IP nel .env.
     """
-    env_url = (os.getenv("MBUS_SOCKET_URL") or "").strip()
-    if env_url:
-        return env_url
     port = (config_port or "").strip()
     if not port:
         return port
-    if os.name != "nt" and re.match(r"^COM\d+$", port, re.I):
-        pc_ip = (os.getenv("PC_IP") or "").strip()
-        tcp_port = (os.getenv("MBUS_TCP_PORT") or "9000").strip()
-        if pc_ip:
+    pc_ip = (os.getenv("PC_IP") or "").strip()
+    if os.name != "nt" and pc_ip:
+        m = re.match(r"^socket://(?:127\.0\.0\.1|localhost):(\d+)$", port, re.I)
+        if m:
+            url = f"socket://{pc_ip}:{m.group(1)}"
+            log.info("M-Bus: %s su Pi -> %s (PC_IP / mirror TCP).", port, url)
+            return url
+        if re.match(r"^COM\d+$", port, re.I):
+            tcp_port = (os.getenv("MBUS_TCP_PORT") or "9000").strip()
             url = f"socket://{pc_ip}:{tcp_port}"
             log.info(
                 "M-Bus: porta Windows %s su Pi -> %s (PC_IP / mirror TCP).",
@@ -246,7 +248,7 @@ class MBusMeter(BaseDevice):
             if target_measures:
                 log.warning(
                     "M-Bus '%s': nessun telegramma su %s (slave %s). "
-                    "Verifica sim+mirror sul PC, firewall TCP 9000, MBUS_SOCKET_URL sulla Pi.",
+                    "Verifica sim+mirror sul PC, firewall TCP 9000, PC_IP nel .env sulla Pi.",
                     self.name,
                     port,
                     self.slave_id,
