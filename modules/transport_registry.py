@@ -119,6 +119,22 @@ class TransportRegistry:
         return nc
 
     @classmethod
+    def close_all_modbus(cls) -> None:
+        """Chiude tutti i client Modbus in cache (reload config / shutdown)."""
+        for client in list(cls._rtu.values()):
+            try:
+                client.close()
+            except Exception:
+                pass
+        cls._rtu.clear()
+        for client in list(cls._tcp.values()):
+            try:
+                client.close()
+            except Exception:
+                pass
+        cls._tcp.clear()
+
+    @classmethod
     def lock_for_modbus_client(cls, client: ModbusSerialClient | ModbusTcpClient) -> asyncio.Lock:
         p = client.comm_params
         if p.comm_type == CommType.TCP:

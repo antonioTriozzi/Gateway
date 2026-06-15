@@ -15,19 +15,24 @@ from modules.readings_json import (
     protocol_for_device,
     readings_for_buffer_export,
 )
-from config import (
-    load_config,
-    fetch_remote_config,
-    save_config_to_cache,
-    load_config_from_cache,
-    normalize_remote_gateway_config,
+from config import load_config
+from modules.config_refresh import (
+    config_refresh_interval_seconds,
+    cycle_timing_from_config,
+    GatewayRuntimeState,
+    maybe_refresh_gateway_config,
 )
-from modules.gateway_config_adapter import apply_progettotesi_device_plumbing
+from modules.gateway_config_loader import (
+    config_revision,
+    load_remote_gateway_config_at_startup,
+    merge_local_remote,
+)
 from modules.knx_gateway_pool import KnxGatewayPool
 from modules.managers import DeviceManager
 from modules.data_buffer import DataBuffer
 from modules.data_uploader import DataUploader
-from modules.web_auth import WebAppAuthClient, WebAppAuthError
+from modules.transport_registry import TransportRegistry
+from modules.web_auth import WebAppAuthClient
 
 
 def _quiet_keyboard_interrupt(exc_type, exc_value, exc_tb):
@@ -58,11 +63,10 @@ def setup_logging():
     if log.hasHandlers():
         log.handlers.clear()
     log.addHandler(handler)
-    # pymodbus: messaggi ERROR su connect / I/O (spesso ridondanti con i nostri WARNING).
     logging.getLogger("pymodbus.logging").setLevel(logging.CRITICAL)
     logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
-    # xknx.__del__ può loggare WARNING se il loop è già chiuso dopo asyncio.run().
     logging.getLogger("xknx").setLevel(logging.ERROR)
+
 
 async def main():
     setup_logging()
@@ -86,75 +90,50 @@ async def main():
         logging.error(f"Errore critico nella configurazione locale: {e}")
         sys.exit(1)
 
-    # Autenticazione M2M (Client Credentials): JWT a vita breve, solo in RAM.
     web_auth = WebAppAuthClient(
         token_url=local_config["web_auth"]["token_url"],
         client_id=local_config["web_auth"]["client_id"],
         client_secret=local_config["web_auth"]["client_secret"],
     )
 
-    remote_conf = None
-    try:
-        access_token = web_auth.get_token()
-        remote_conf = fetch_remote_config(
-            base_url=local_config["remote_config"]["url"],
-            condominio_id=local_config["id_condominio"],
-            token=access_token,
-        )
-    except WebAppAuthError as e:
-        logging.error("Autenticazione client_credentials fallita: %s", e)
-
-    if remote_conf:
-        remote_conf = normalize_remote_gateway_config(remote_conf)
-        remote_conf = apply_progettotesi_device_plumbing(remote_conf)
-        logging.info("Configurazione remota scaricata con successo.")
-        save_config_to_cache(remote_conf)
-    else:
-        logging.warning("Download fallito. Tentativo di caricamento dalla cache...")
-        remote_conf = load_config_from_cache()
-        if remote_conf:
-            remote_conf = normalize_remote_gateway_config(remote_conf)
-            remote_conf = apply_progettotesi_device_plumbing(remote_conf)
-
+    remote_conf = load_remote_gateway_config_at_startup(web_auth, local_config)
     if not remote_conf:
-        logging.error("Impossibile ottenere la configurazione, né dal server né dalla cache. L'applicazione non può continuare.")
+        logging.error(
+            "Impossibile ottenere la configurazione, né dal server né dalla cache. "
+            "L'applicazione non può continuare."
+        )
         sys.exit(1)
-    
+
     logging.info("Configurazione remota pronta per l'uso (da server o cache).")
 
-    # Preferisci valori .env (upload URL, credenziali M2M, …) su eventuali chiavi omonime nel JSON remoto.
-    full_config = {**remote_conf, **local_config}
+    full_config = merge_local_remote(local_config, remote_conf)
+    cycle_total, read_phase, upload_phase = cycle_timing_from_config(full_config)
+    refresh_interval = config_refresh_interval_seconds()
+    if refresh_interval > 0:
+        logging.info(
+            "Refresh config remota ogni %.0fs (CONFIG_REFRESH_INTERVAL_SECONDS).",
+            refresh_interval,
+        )
+    else:
+        logging.info(
+            "Refresh config remota disabilitato (CONFIG_REFRESH_INTERVAL_SECONDS=0)."
+        )
 
     buffer = DataBuffer()
-
-    try:
-        cycle_total = float(full_config.get("system_config", {}).get("poll_interval", 60))
-    except (TypeError, ValueError):
-        cycle_total = 60.0
-    env_ct = (os.getenv("GATEWAY_CYCLE_TOTAL_SECONDS") or "").strip()
-    if env_ct:
-        try:
-            cycle_total = float(env_ct)
-        except (TypeError, ValueError):
-            pass
-    cycle_total = max(1.0, cycle_total)
-
-    env_rp = (os.getenv("GATEWAY_READ_PHASE_SECONDS") or "").strip()
-    if env_rp:
-        try:
-            read_phase = float(env_rp)
-        except (TypeError, ValueError):
-            read_phase = cycle_total / 2.0
-    else:
-        read_phase = cycle_total / 2.0
-    read_phase = max(0.0, min(read_phase, cycle_total))
-    upload_phase = max(0.0, cycle_total - read_phase)
-
     uploader = DataUploader(config=full_config, buffer=buffer, auth=web_auth)
     devices = DeviceManager.create_devices(full_config)
     logging.info(f"Dispositivi inizializzati: {len(devices)}")
 
-    # Un worker per dispositivo (o più) così nessun COM/TCP lento blocca le letture parallele.
+    runtime = GatewayRuntimeState(
+        full_config=full_config,
+        devices=devices,
+        revision=config_revision(remote_conf),
+        cycle_total=cycle_total,
+        read_phase=read_phase,
+        upload_phase=upload_phase,
+        last_refresh_monotonic=time.monotonic(),
+    )
+
     io_workers = max(16, len(devices) * 3, 1)
     io_executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=io_workers,
@@ -188,9 +167,9 @@ async def main():
     logging.info(
         "Ciclo gateway: %.1fs totali (fase lettura fino a %.1fs, poi pausa %.1fs; "
         "upload telemetria a fine lettura di tutti i dispositivi, retry a fine pausa se il buffer non è vuoto).",
-        cycle_total,
-        read_phase,
-        upload_phase,
+        runtime.cycle_total,
+        runtime.read_phase,
+        runtime.upload_phase,
     )
 
     try:
@@ -216,6 +195,10 @@ async def main():
     try:
         while not shutdown.is_set():
             cycle_started = time.monotonic()
+            cycle_total = runtime.cycle_total
+            read_phase = runtime.read_phase
+            devices = runtime.devices
+
             try:
                 logging.info("--- Inizio ciclo di lettura (sequenziale: una lettura per dispositivo) ---")
 
@@ -271,8 +254,18 @@ async def main():
                     )
                 if await _interruptible_sleep(read_padding, shutdown):
                     break
+
+                idle_started = time.monotonic()
+                runtime = await maybe_refresh_gateway_config(
+                    runtime,
+                    web_auth,
+                    local_config,
+                    refresh_interval,
+                )
+
                 after_read_window = time.monotonic() - cycle_started
-                pause = max(0.0, cycle_total - after_read_window)
+                idle_spent = time.monotonic() - idle_started
+                pause = max(0.0, cycle_total - after_read_window - idle_spent)
                 logging.info(
                     "--- Dopo fase lettura: %.1fs. Dati in attesa: %s. Pausa (fase invio / idle) %.1fs "
                     "(ciclo totale %.1fs) ---",
@@ -293,8 +286,10 @@ async def main():
             await KnxGatewayPool.stop_all()
         except Exception as e:
             logging.debug("Stop KNX: %s", e)
+        TransportRegistry.close_all_modbus()
         io_executor.shutdown(wait=False, cancel_futures=True)
         logging.info("Gateway arrestato.")
+
 
 if __name__ == "__main__":
     sys.excepthook = _quiet_keyboard_interrupt
