@@ -24,6 +24,14 @@ log = logging.getLogger(__name__)
 ModbusClient = Union[ModbusSerialClient, ModbusTcpClient]
 
 
+def format_modbus_client_endpoint(client: ModbusClient) -> str:
+    p = client.comm_params
+    if p.comm_type == CommType.TCP:
+        return f"ModbusTcpClient {p.host}:{p.port}"
+    port = getattr(p, "port", None) or ""
+    return f"ModbusSerialClient {port}"
+
+
 def _modbus_register_read_kind(reg_type_raw: Any) -> str:
     """input → read_input_registers; tutto il resto (holding, hr, …) → holding."""
     u = str(reg_type_raw or "holding").strip().lower().replace("-", "_")
@@ -173,7 +181,7 @@ class ModbusMeter(BaseDevice):
                     log.warning(
                         "Modbus '%s': server non raggiungibile (%s). Nessuna lettura in questo ciclo.",
                         self.name,
-                        self.client,
+                        format_modbus_client_endpoint(self.client),
                     )
                     return []
 

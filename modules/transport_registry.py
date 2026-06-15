@@ -12,6 +12,7 @@ from pymodbus.client import ModbusSerialClient, ModbusTcpClient
 from pymodbus.transport import CommType
 
 from modules.serial_manager import SerialManager
+from modules.modbus_lab_resolve import resolve_modbus_rtu_port, resolve_modbus_tcp_host_port
 
 
 def _modbus_timeout() -> float:
@@ -59,6 +60,7 @@ class TransportRegistry:
         stopbits: int = 1,
         timeout: float = 1.0,
     ) -> Tuple[ModbusSerialClient, asyncio.Lock]:
+        port = resolve_modbus_rtu_port(port)
         # Stessa porta fisica → un solo client (il timeout non fa parte della chiave).
         key = f"{port}|{baudrate}|{parity}|{stopbits}"
         if key not in cls._rtu:
@@ -77,6 +79,7 @@ class TransportRegistry:
     def get_modbus_tcp(
         cls, host: str, port: int, *, timeout: float | None = None
     ) -> Tuple[ModbusTcpClient, asyncio.Lock]:
+        host, port = resolve_modbus_tcp_host_port(host, int(port))
         key = (host, int(port))
         if key not in cls._tcp:
             t = timeout if timeout is not None else _modbus_timeout()
@@ -96,6 +99,8 @@ class TransportRegistry:
         Alcuni stack (Windows + simulatori) lasciano l'istanza vecchia non riconnettibile
         dopo close(); una nuova istanza evita letture vuote al ciclo successivo.
         """
+        key = (host.strip(), int(port))
+        host, port = resolve_modbus_tcp_host_port(key[0], key[1])
         key = (host.strip(), int(port))
         old = cls._tcp.pop(key, None)
         if old is not None:

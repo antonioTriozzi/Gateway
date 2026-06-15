@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Tuple
 from modules.devices.base_device import BaseDevice
 from modules.devices.knx_meter import KnxMeter
 from modules.devices.modbus_meter import ModbusMeter
+from modules.modbus_lab_resolve import resolve_modbus_rtu_port, resolve_modbus_tcp_host_port
 from modules.devices.mbus_meter import MBusMeter, resolve_mbus_port
 from modules.gateway_config_adapter import parse_knx_host_port, resolve_driver
 from modules.gateway_device_config import merge_gateway_device_config
@@ -37,11 +38,12 @@ class DeviceManager:
                 if transport == "tcp":
                     host = (spec.get("host") or "127.0.0.1").strip()
                     port = int(spec.get("port") or 502)
+                    host, port = resolve_modbus_tcp_host_port(host, port)
                     client, lock = TransportRegistry.get_modbus_tcp(host, port)
                     out[name] = ("modbus", client, lock)
                     logging.info("Modbus TCP %s → %s:%s", name, host, port)
                 elif transport == "rtu":
-                    port = (spec.get("port") or "").strip()
+                    port = resolve_modbus_rtu_port((spec.get("port") or "").strip())
                     if not port:
                         logging.error("Interfaccia %s: porta RTU mancante.", name)
                         continue

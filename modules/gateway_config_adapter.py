@@ -26,6 +26,37 @@ def _sanitize_key(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(s))
 
 
+def apply_modbus_lab_mirror_resolve(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Su Pi/Linux: risolve interfacce Modbus dalla Web App (127.0.0.1, COM3)
+    verso PC_IP e porte mirror (come MBUS_SOCKET_URL per M-Bus).
+    """
+    from modules.modbus_lab_resolve import (
+        resolve_modbus_rtu_port,
+        resolve_modbus_tcp_host_port,
+    )
+
+    sc = cfg.get("system_config")
+    if not isinstance(sc, dict):
+        return cfg
+    ifaces = sc.get("interfaces")
+    if not isinstance(ifaces, dict):
+        return cfg
+    for spec in ifaces.values():
+        if not isinstance(spec, dict):
+            continue
+        transport = (spec.get("transport") or "").lower()
+        if transport == "tcp":
+            host = (spec.get("host") or "127.0.0.1").strip()
+            port = int(spec.get("port") or 502)
+            host, port = resolve_modbus_tcp_host_port(host, port)
+            spec["host"] = host
+            spec["port"] = port
+        elif transport == "rtu":
+            spec["port"] = resolve_modbus_rtu_port((spec.get("port") or "").strip())
+    return cfg
+
+
 def parse_knx_host_port(host_raw: Any, port_raw: Any) -> tuple[str, int]:
     """
     Host e porta KNX separati (come Modbus TCP).
@@ -88,11 +119,14 @@ def apply_progettotesi_device_plumbing(cfg: Dict[str, Any]) -> Dict[str, Any]:
         knx_by_id.setdefault(str(default_gw["id"]), default_gw)
 
     new_ifaces: Dict[str, Dict[str, Any]] = {}
+    prev_ifaces = sc.get("interfaces")
+    if isinstance(prev_ifaces, dict):
+        for ik, iv in prev_ifaces.items():
+            if isinstance(iv, dict):
+                new_ifaces.setdefault(ik, copy.deepcopy(iv))
 
     for dev in inv:
         if not isinstance(dev, dict):
-            continue
-        if dev.get("interface"):
             continue
 
         proto = (dev.get("comm_protocol") or "").strip().upper()
@@ -212,7 +246,7 @@ def apply_progettotesi_device_plumbing(cfg: Dict[str, Any]) -> Dict[str, Any]:
         dev["interface"] = iface
 
     sc["interfaces"] = new_ifaces
-    return out
+    return apply_modbus_lab_mirror_resolve(out)
 
 
 def _map_parity(p: str) -> str:

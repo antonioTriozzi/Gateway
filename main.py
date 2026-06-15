@@ -71,6 +71,17 @@ async def main():
     try:
         local_config = load_config()
         logging.info("Configurazione locale caricata correttamente.")
+        pc_ip = (os.getenv("PC_IP") or "").strip()
+        if pc_ip and os.name != "nt":
+            logging.info(
+                "Lab mirror: PC_IP=%s (M-Bus/Modbus dalla Web App -> simulatore sul PC).",
+                pc_ip,
+            )
+        elif os.name != "nt":
+            logging.warning(
+                "PC_IP non impostato nel .env: Modbus/M-Bus useranno host/porta dalla Web App "
+                "(127.0.0.1 / COMx sulla Pi)."
+            )
     except ValueError as e:
         logging.error(f"Errore critico nella configurazione locale: {e}")
         sys.exit(1)
